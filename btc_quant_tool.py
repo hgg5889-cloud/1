@@ -27,7 +27,7 @@ from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
 from ta.volatility import BollingerBands
 from ta.volume import MFIIndicator, OnBalanceVolumeIndicator
-from tensorflow.keras.layers import Dense, Input, LSTM
+from tensorflow.keras.layers import Dense, GRU, Input, LSTM
 from tensorflow.keras.models import Sequential
 
 # 忽略 tkinter 字体警告
@@ -50,6 +50,7 @@ SUPPORTED_INTERVALS = [
     "12h",
     "1d",
 ]
+MODEL_OPTIONS = ["LSTM", "GRU"]
 
 
 # 获取实时价格数据
@@ -189,7 +190,7 @@ def scale_data(data):
 
 
 # LSTM模型训练
-def train_lstm(df):
+def train_lstm(df, model_type="LSTM"):
     df_close = df["close"].values.reshape(-1, 1)
     data_scaled, scaler = scale_data(df_close)
 
@@ -206,14 +207,24 @@ def train_lstm(df):
 
     X = X.reshape(X.shape[0], X.shape[1], 1)
 
-    model = Sequential(
-        [
-            Input(shape=(X.shape[1], 1)),
-            LSTM(units=50, return_sequences=True),
-            LSTM(units=50, return_sequences=False),
-            Dense(units=1),
-        ]
-    )
+    if model_type == "GRU":
+        model = Sequential(
+            [
+                Input(shape=(X.shape[1], 1)),
+                GRU(units=64, return_sequences=True),
+                GRU(units=32, return_sequences=False),
+                Dense(units=1),
+            ]
+        )
+    else:
+        model = Sequential(
+            [
+                Input(shape=(X.shape[1], 1)),
+                LSTM(units=50, return_sequences=True),
+                LSTM(units=50, return_sequences=False),
+                Dense(units=1),
+            ]
+        )
 
     model.compile(optimizer="adam", loss="mean_squared_error")
     model.fit(X, y, epochs=1, batch_size=1, verbose=2)
@@ -512,6 +523,7 @@ def run_gui():
 
     interval_var = StringVar(value=INTERVAL)
     refresh_seconds = StringVar(value=str(DEFAULT_REFRESH_SECONDS))
+    model_var = StringVar(value=MODEL_OPTIONS[0])
     macro_sources = [
         ("标普500", "^GSPC"),
         ("美元指数", "DX-Y.NYB"),
@@ -543,6 +555,16 @@ def run_gui():
     )
     refresh_select.pack(side=LEFT, padx=6)
 
+    Label(control_frame, text="模型:").pack(side=LEFT, padx=6)
+    model_select = ttk.Combobox(
+        control_frame,
+        textvariable=model_var,
+        values=MODEL_OPTIONS,
+        width=6,
+        state="readonly",
+    )
+    model_select.pack(side=LEFT, padx=6)
+
     Label(control_frame, text="宏观指标:").pack(side=LEFT, padx=6)
     macro_listbox = Listbox(control_frame, selectmode="multiple", height=3, exportselection=False)
     for label, _ in macro_sources:
@@ -558,6 +580,24 @@ def run_gui():
 
     report_box = Text(root, height=12)
     report_box.pack(fill=BOTH, padx=8, pady=6)
+
+    account_frame = Frame(root)
+    account_frame.pack(fill=BOTH, padx=8, pady=6)
+    Label(account_frame, text="币安模拟仓").pack(side=LEFT, padx=6)
+    balance_var = StringVar(value="余额: 10000.00 USDT")
+    position_var = StringVar(value="持仓: 0.00 BTC")
+    entry_var = StringVar(value="入场价: N/A")
+    pnl_var = StringVar(value="未实现盈亏: 0.00 USDT")
+    Label(account_frame, textvariable=balance_var).pack(side=LEFT, padx=6)
+    Label(account_frame, textvariable=position_var).pack(side=LEFT, padx=6)
+    Label(account_frame, textvariable=entry_var).pack(side=LEFT, padx=6)
+    Label(account_frame, textvariable=pnl_var).pack(side=LEFT, padx=6)
+
+    account_state = {
+        "balance": 10000.0,
+        "position": 0.0,
+        "entry_price": None,
+    }
 
     running = {"value": True}
 
@@ -583,7 +623,7 @@ def run_gui():
                 short_ema,
                 long_ema,
             ) = compute_indicators(df_btc)
-            predicted_price = train_lstm(df_btc)
+            predicted_price = train_lstm(df_btc, model_type=model_var.get())
             buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
             support, resistance = calculate_support_resistance(
                 df_btc,
@@ -642,6 +682,19 @@ def run_gui():
             canvas.draw()
             status_label.config(text=f"状态: 已更新 {datetime.now().strftime('%H:%M:%S')}")
 
+            if account_state["position"] != 0 and account_state["entry_price"]:
+                pnl = (price - account_state["entry_price"]) * account_state["position"]
+            else:
+                pnl = 0.0
+            balance_var.set(f"余额: {account_state['balance']:.2f} USDT")
+            position_var.set(f"持仓: {account_state['position']:.4f} BTC")
+            entry_var.set(
+                "入场价: N/A"
+                if account_state["entry_price"] is None
+                else f"入场价: {account_state['entry_price']:.2f}"
+            )
+            pnl_var.set(f"未实现盈亏: {pnl:.2f} USDT")
+
         refresh_ms = int(refresh_seconds.get()) * 1000
         root.after(refresh_ms, update_once)
 
@@ -655,8 +708,41 @@ def run_gui():
     def manual_refresh():
         update_once()
 
+    def open_long():
+        if not running["value"]:
+            return
+        if account_state["position"] != 0:
+            return
+        interval = interval_var.get()
+        df_btc, _ = collect_data(interval=interval)
+        if df_btc.empty:
+            return
+        price = df_btc["close"].iloc[-1]
+        qty = account_state["balance"] / price
+        account_state["position"] = qty
+        account_state["balance"] = 0.0
+        account_state["entry_price"] = price
+        update_once()
+
+    def close_position():
+        if not running["value"]:
+            return
+        if account_state["position"] == 0 or account_state["entry_price"] is None:
+            return
+        interval = interval_var.get()
+        df_btc, _ = collect_data(interval=interval)
+        if df_btc.empty:
+            return
+        price = df_btc["close"].iloc[-1]
+        account_state["balance"] = account_state["position"] * price
+        account_state["position"] = 0.0
+        account_state["entry_price"] = None
+        update_once()
+
     Button(control_frame, text="开始/暂停", command=toggle_running).pack(side=LEFT, padx=8)
     Button(control_frame, text="手动刷新", command=manual_refresh).pack(side=LEFT, padx=6)
+    Button(control_frame, text="开多(模拟)", command=open_long).pack(side=LEFT, padx=6)
+    Button(control_frame, text="平仓(模拟)", command=close_position).pack(side=LEFT, padx=6)
 
     update_once()
     root.mainloop()
