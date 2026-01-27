@@ -711,7 +711,34 @@ def run_gui():
     canvas = FigureCanvasTkAgg(figure, master=root)
     canvas.get_tk_widget().pack(fill=BOTH, expand=True, padx=8, pady=6)
 
-    report_box = Text(root, height=12, wrap="word", font=("TkFixedFont", 10))
+    metrics_frame = Frame(root)
+    metrics_frame.pack(fill=BOTH, padx=8, pady=6)
+    Label(metrics_frame, text="关键指标").pack(side=LEFT, padx=6)
+    metrics_table = ttk.Treeview(
+        metrics_frame,
+        columns=("label", "value"),
+        show="headings",
+        height=6,
+    )
+    metrics_table.heading("label", text="指标")
+    metrics_table.heading("value", text="数值")
+    metrics_table.column("label", width=140, anchor="w")
+    metrics_table.column("value", width=180, anchor="center")
+    metrics_table.pack(side=LEFT, padx=6)
+    metrics_rows = [
+        ("price", "当前价"),
+        ("delta", "涨跌幅"),
+        ("support", "支撑位"),
+        ("resistance", "压力位"),
+        ("support_1h", "1H支撑"),
+        ("resistance_1h", "1H压力"),
+        ("support_4h", "4H支撑"),
+        ("resistance_4h", "4H压力"),
+    ]
+    for row_id, label in metrics_rows:
+        metrics_table.insert("", "end", iid=row_id, values=(label, "—"))
+
+    report_box = Text(root, height=10, wrap="word", font=("TkFixedFont", 10))
     report_box.pack(fill=BOTH, padx=8, pady=6)
     report_box.tag_configure("center", justify="center")
 
@@ -722,10 +749,12 @@ def run_gui():
     position_var = StringVar(value="持仓: 0.00 BTC")
     entry_var = StringVar(value="入场价: N/A")
     pnl_var = StringVar(value="未实现盈亏: 0.00 USDT")
+    side_var = StringVar(value="方向: N/A")
     Label(account_frame, textvariable=balance_var).pack(side=LEFT, padx=6)
     Label(account_frame, textvariable=position_var).pack(side=LEFT, padx=6)
     Label(account_frame, textvariable=entry_var).pack(side=LEFT, padx=6)
     Label(account_frame, textvariable=pnl_var).pack(side=LEFT, padx=6)
+    Label(account_frame, textvariable=side_var).pack(side=LEFT, padx=6)
     amount_var = StringVar(value="1000")
     Label(account_frame, text="下单金额(USDT):").pack(side=LEFT, padx=6)
     amount_entry = Entry(account_frame, textvariable=amount_var, width=8)
@@ -735,6 +764,8 @@ def run_gui():
         "balance": 10000.0,
         "position": 0.0,
         "entry_price": None,
+        "side": None,
+        "notional": 0.0,
     }
 
     running = {"value": False}
@@ -838,6 +869,15 @@ def run_gui():
                     long_ema,
                 ),
             )
+            metrics_table.set("price", "value", f"{price:.2f}")
+            metrics_table.set("delta", "value", f"{delta:+.2f} ({delta_pct:+.2f}%)")
+            metrics_table.set("support", "value", format_level(support))
+            metrics_table.set("resistance", "value", format_level(resistance))
+            metrics_table.set("support_1h", "value", format_level(support_1h))
+            metrics_table.set("resistance_1h", "value", format_level(resistance_1h))
+            metrics_table.set("support_4h", "value", format_level(support_4h))
+            metrics_table.set("resistance_4h", "value", format_level(resistance_4h))
+
             report_box.delete("1.0", END)
             report_box.insert(END, report)
             report_box.tag_add("center", "1.0", END)
@@ -854,7 +894,10 @@ def run_gui():
             status_label.config(text=f"状态: 已更新 {datetime.now().strftime('%H:%M:%S')}")
 
             if account_state["position"] != 0 and account_state["entry_price"]:
-                pnl = (price - account_state["entry_price"]) * account_state["position"]
+                if account_state["side"] == "short":
+                    pnl = (account_state["entry_price"] - price) * account_state["position"]
+                else:
+                    pnl = (price - account_state["entry_price"]) * account_state["position"]
             else:
                 pnl = 0.0
             balance_var.set(f"余额: {account_state['balance']:.2f} USDT")
@@ -865,6 +908,7 @@ def run_gui():
                 else f"入场价: {account_state['entry_price']:.2f}"
             )
             pnl_var.set(f"未实现盈亏: {pnl:.2f} USDT")
+            side_var.set(f"方向: {account_state['side'] or 'N/A'}")
 
         if running["value"]:
             refresh_ms = int(refresh_seconds.get()) * 1000
@@ -899,6 +943,8 @@ def run_gui():
         account_state["position"] = qty
         account_state["balance"] -= amount
         account_state["entry_price"] = price
+        account_state["side"] = "long"
+        account_state["notional"] = amount
         update_once(force=True)
 
     def close_position():
@@ -909,14 +955,44 @@ def run_gui():
         if df_btc.empty:
             return
         price = df_btc["close"].iloc[-1]
-        account_state["balance"] = account_state["position"] * price
+        if account_state["side"] == "short":
+            pnl = (account_state["entry_price"] - price) * account_state["position"]
+            account_state["balance"] += account_state["notional"] + pnl
+        else:
+            account_state["balance"] += account_state["position"] * price
         account_state["position"] = 0.0
         account_state["entry_price"] = None
+        account_state["side"] = None
+        account_state["notional"] = 0.0
+        update_once(force=True)
+
+    def open_short():
+        if account_state["position"] != 0:
+            return
+        interval = interval_var.get()
+        df_btc, _ = collect_data(interval=interval)
+        if df_btc.empty:
+            return
+        price = df_btc["close"].iloc[-1]
+        try:
+            amount = float(amount_var.get())
+        except ValueError:
+            amount = 0.0
+        amount = max(min(amount, account_state["balance"]), 0.0)
+        if amount <= 0:
+            return
+        qty = amount / price
+        account_state["position"] = qty
+        account_state["balance"] -= amount
+        account_state["entry_price"] = price
+        account_state["side"] = "short"
+        account_state["notional"] = amount
         update_once(force=True)
 
     Button(control_frame, text="自动/手动", command=toggle_running).pack(side=LEFT, padx=8)
     Button(control_frame, text="手动刷新", command=manual_refresh).pack(side=LEFT, padx=6)
     Button(control_frame, text="开多(模拟)", command=open_long).pack(side=LEFT, padx=6)
+    Button(control_frame, text="开空(模拟)", command=open_short).pack(side=LEFT, padx=6)
     Button(control_frame, text="平仓(模拟)", command=close_position).pack(side=LEFT, padx=6)
 
     root.mainloop()
