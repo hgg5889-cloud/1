@@ -39,6 +39,7 @@ BINANCE_FUTURES_BASE = "https://fapi.binance.com/fapi/v1"
 SYMBOL = "BTCUSDT"
 INTERVAL = "4h"  # 4小时数据
 DEFAULT_REFRESH_SECONDS = 5
+PLOT_POINTS = 200
 SUPPORTED_INTERVALS = [
     "1m",
     "5m",
@@ -348,6 +349,7 @@ def build_report(
     sell_depth=None,
     trend_info=None,
     macro_info=None,
+    price_change_info=None,
 ):
     def fmt(value):
         return f"{value:.2f}" if pd.notna(value) else "N/A"
@@ -357,6 +359,8 @@ def build_report(
         f"预测价格: {fmt(predicted_price)}",
         f"支撑位: {fmt(support)} 阻力位: {fmt(resistance)}",
     ]
+    if price_change_info:
+        lines.append(price_change_info)
     if buy_depth and sell_depth:
         lines.append(f"深度: 买盘{len(buy_depth)} 档 / 卖盘{len(sell_depth)} 档")
     lines.append(f"RSI: {rsi:.2f}  MACD: {macd_line:.4f}/{signal:.4f}")
@@ -527,11 +531,12 @@ def format_level(value):
 # 可视化价格与预测结果
 def plot_graph(ax, df, predicted_price, levels=None):
     ax.clear()
-    ax.plot(df["close"], label="实际价格")
-    ax.axvline(x=len(df), color="r", linestyle="--", label="预测点")
-    ax.scatter(len(df), predicted_price, color="g", label="预测价格", zorder=5)
+    view = df.tail(PLOT_POINTS)
+    ax.plot(view["close"], label="实际价格")
+    ax.axvline(x=len(view), color="r", linestyle="--", label="预测点")
+    ax.scatter(len(view), predicted_price, color="g", label="预测价格", zorder=5)
     if levels:
-        x_pos = len(df) - 1
+        x_pos = len(view) - 1
         for label, value, color in levels:
             if pd.isna(value):
                 continue
@@ -553,6 +558,11 @@ def run_gui():
     root = Tk()
     root.title("BTC量化交易工具")
     root.geometry("1100x700")
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except Exception:
+        pass
 
     interval_var = StringVar(value=INTERVAL)
     refresh_seconds = StringVar(value=str(DEFAULT_REFRESH_SECONDS))
@@ -604,6 +614,7 @@ def run_gui():
     for label, _ in macro_sources:
         macro_listbox.insert(END, label)
     macro_listbox.pack(side=LEFT, padx=6)
+    macro_listbox.select_set(0, END)
 
     Label(control_frame, text="资金流向:").pack(side=LEFT, padx=6)
     flow_listbox = Listbox(control_frame, selectmode="multiple", height=3, exportselection=False)
@@ -641,8 +652,8 @@ def run_gui():
 
     running = {"value": True}
 
-    def update_once():
-        if not running["value"]:
+    def update_once(force=False):
+        if not running["value"] and not force:
             return
         interval = interval_var.get()
         status_label.config(text="状态: 获取数据中")
@@ -654,6 +665,10 @@ def run_gui():
             status_label.config(text="状态: 数据为空")
         else:
             price = df_btc["close"].iloc[-1]
+            prev_price = df_btc["close"].iloc[-2] if len(df_btc) > 1 else price
+            delta = price - prev_price
+            delta_pct = (delta / prev_price * 100) if prev_price else 0
+            price_change_info = f"最新价变动: {delta:+.2f} ({delta_pct:+.2f}%)"
             (
                 rsi,
                 macd_line,
@@ -724,6 +739,7 @@ def run_gui():
                     + f"\n{build_depth_insights()}"
                 ),
                 macro_info=macro_info,
+                price_change_info=price_change_info,
             )
             report_box.delete("1.0", END)
             report_box.insert(END, report)
@@ -763,11 +779,9 @@ def run_gui():
             update_once()
 
     def manual_refresh():
-        update_once()
+        update_once(force=True)
 
     def open_long():
-        if not running["value"]:
-            return
         if account_state["position"] != 0:
             return
         interval = interval_var.get()
@@ -779,11 +793,9 @@ def run_gui():
         account_state["position"] = qty
         account_state["balance"] = 0.0
         account_state["entry_price"] = price
-        update_once()
+        update_once(force=True)
 
     def close_position():
-        if not running["value"]:
-            return
         if account_state["position"] == 0 or account_state["entry_price"] is None:
             return
         interval = interval_var.get()
@@ -794,7 +806,7 @@ def run_gui():
         account_state["balance"] = account_state["position"] * price
         account_state["position"] = 0.0
         account_state["entry_price"] = None
-        update_once()
+        update_once(force=True)
 
     Button(control_frame, text="开始/暂停", command=toggle_running).pack(side=LEFT, padx=8)
     Button(control_frame, text="手动刷新", command=manual_refresh).pack(side=LEFT, padx=6)
@@ -818,6 +830,10 @@ def monitor():
                 continue  # 如果没有数据返回，跳过当前循环
 
             price = df_btc["close"].iloc[-1]
+            prev_price = df_btc["close"].iloc[-2] if len(df_btc) > 1 else price
+            delta = price - prev_price
+            delta_pct = (delta / prev_price * 100) if prev_price else 0
+            price_change_info = f"最新价变动: {delta:+.2f} ({delta_pct:+.2f}%)"
 
             # 计算指标
             (
@@ -886,6 +902,7 @@ def monitor():
                     f"{build_depth_insights()}"
                 ),
                 macro_info=macro_info,
+                price_change_info=price_change_info,
             )
 
             # 可视化
