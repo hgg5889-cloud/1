@@ -7,6 +7,7 @@ from tkinter import (
     LEFT,
     RIGHT,
     Button,
+    Entry,
     Frame,
     Label,
     Listbox,
@@ -710,8 +711,9 @@ def run_gui():
     canvas = FigureCanvasTkAgg(figure, master=root)
     canvas.get_tk_widget().pack(fill=BOTH, expand=True, padx=8, pady=6)
 
-    report_box = Text(root, height=12)
+    report_box = Text(root, height=12, wrap="word", font=("TkFixedFont", 10))
     report_box.pack(fill=BOTH, padx=8, pady=6)
+    report_box.tag_configure("center", justify="center")
 
     account_frame = Frame(root)
     account_frame.pack(fill=BOTH, padx=8, pady=6)
@@ -724,6 +726,10 @@ def run_gui():
     Label(account_frame, textvariable=position_var).pack(side=LEFT, padx=6)
     Label(account_frame, textvariable=entry_var).pack(side=LEFT, padx=6)
     Label(account_frame, textvariable=pnl_var).pack(side=LEFT, padx=6)
+    amount_var = StringVar(value="1000")
+    Label(account_frame, text="下单金额(USDT):").pack(side=LEFT, padx=6)
+    amount_entry = Entry(account_frame, textvariable=amount_var, width=8)
+    amount_entry.pack(side=LEFT, padx=4)
 
     account_state = {
         "balance": 10000.0,
@@ -834,6 +840,7 @@ def run_gui():
             )
             report_box.delete("1.0", END)
             report_box.insert(END, report)
+            report_box.tag_add("center", "1.0", END)
             levels = [
                 (f"{interval.upper()}支撑", support, "tab:green"),
                 (f"{interval.upper()}压力", resistance, "tab:red"),
@@ -880,9 +887,16 @@ def run_gui():
         if df_btc.empty:
             return
         price = df_btc["close"].iloc[-1]
-        qty = account_state["balance"] / price
+        try:
+            amount = float(amount_var.get())
+        except ValueError:
+            amount = 0.0
+        amount = max(min(amount, account_state["balance"]), 0.0)
+        if amount <= 0:
+            return
+        qty = amount / price
         account_state["position"] = qty
-        account_state["balance"] = 0.0
+        account_state["balance"] -= amount
         account_state["entry_price"] = price
         update_once(force=True)
 
