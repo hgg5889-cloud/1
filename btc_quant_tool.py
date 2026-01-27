@@ -519,9 +519,14 @@ def build_depth_insights():
 
 
 class TradeStrategy:
-    def __init__(self, risk_profile="balanced"):
+    def __init__(self, risk_profile="balanced", config_override=None):
         self.risk_profile = risk_profile
-        self.config = STRATEGY_RISK_CONFIG.get(risk_profile, STRATEGY_RISK_CONFIG["balanced"])
+        base_config = STRATEGY_RISK_CONFIG.get(risk_profile, STRATEGY_RISK_CONFIG["balanced"])
+        override = config_override or {}
+        self.config = {
+            "risk_pct": override.get("risk_pct", base_config["risk_pct"]),
+            "rr": override.get("rr", base_config["rr"]),
+        }
 
     def _position_size(self, account_balance, entry, stop):
         risk_amount = account_balance * self.config["risk_pct"]
@@ -579,8 +584,18 @@ class TradeStrategy:
         return "极端波动应对: 价格正常，维持原策略或减小仓位"
 
 
-def build_strategy_report(price, support, resistance, rsi, macd_line, signal, short_ema, long_ema):
-    strategy = TradeStrategy()
+def build_strategy_report(
+    price,
+    support,
+    resistance,
+    rsi,
+    macd_line,
+    signal,
+    short_ema,
+    long_ema,
+    strategy=None,
+):
+    strategy = strategy or TradeStrategy()
     return "\n".join(
         [
             strategy.short_term_strategy(price, support, resistance, rsi, macd_line, signal),
@@ -649,6 +664,9 @@ def run_gui():
     interval_var = StringVar(value=INTERVAL)
     refresh_seconds = StringVar(value=str(DEFAULT_REFRESH_SECONDS))
     model_var = StringVar(value=MODEL_OPTIONS[0])
+    risk_profile_var = StringVar(value="balanced")
+    risk_pct_var = StringVar(value=str(STRATEGY_RISK_CONFIG["balanced"]["risk_pct"]))
+    rr_var = StringVar(value=str(STRATEGY_RISK_CONFIG["balanced"]["rr"]))
     macro_sources = [
         ("标普500", "^GSPC"),
         ("美元指数", "DX-Y.NYB"),
@@ -657,6 +675,24 @@ def run_gui():
         ("美债10Y", "^TNX"),
     ]
     flow_sources = [(label, label) for label in FLOW_INTERVAL_OPTIONS]
+
+    def sync_risk_profile():
+        config = STRATEGY_RISK_CONFIG.get(risk_profile_var.get(), STRATEGY_RISK_CONFIG["balanced"])
+        risk_pct_var.set(str(config["risk_pct"]))
+        rr_var.set(str(config["rr"]))
+
+    def parse_float(value, default):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+
+    def get_strategy_config():
+        profile = risk_profile_var.get()
+        base = STRATEGY_RISK_CONFIG.get(profile, STRATEGY_RISK_CONFIG["balanced"])
+        risk_pct = parse_float(risk_pct_var.get(), base["risk_pct"])
+        rr = parse_float(rr_var.get(), base["rr"])
+        return profile, {"risk_pct": risk_pct, "rr": rr}
 
     control_frame = Frame(root)
     control_frame.pack(fill=BOTH, padx=8, pady=6)
@@ -706,6 +742,26 @@ def run_gui():
 
     status_label = Label(control_frame, text="状态: 手动刷新")
     status_label.pack(side=RIGHT)
+
+    strategy_config_frame = Frame(root)
+    strategy_config_frame.pack(fill=BOTH, padx=8, pady=4)
+    Label(strategy_config_frame, text="策略定制").pack(side=LEFT, padx=6)
+    Label(strategy_config_frame, text="风险偏好:").pack(side=LEFT, padx=4)
+    risk_profile_select = ttk.Combobox(
+        strategy_config_frame,
+        textvariable=risk_profile_var,
+        values=list(STRATEGY_RISK_CONFIG.keys()),
+        width=12,
+        state="readonly",
+    )
+    risk_profile_select.pack(side=LEFT, padx=4)
+    risk_profile_select.bind("<<ComboboxSelected>>", lambda _event: sync_risk_profile())
+    Label(strategy_config_frame, text="风险占比:").pack(side=LEFT, padx=4)
+    risk_pct_entry = Entry(strategy_config_frame, textvariable=risk_pct_var, width=8)
+    risk_pct_entry.pack(side=LEFT, padx=4)
+    Label(strategy_config_frame, text="盈亏比:").pack(side=LEFT, padx=4)
+    rr_entry = Entry(strategy_config_frame, textvariable=rr_var, width=8)
+    rr_entry.pack(side=LEFT, padx=4)
 
     figure, ax = plt.subplots(figsize=(6, 4))
     canvas = FigureCanvasTkAgg(figure, master=root)
@@ -874,7 +930,8 @@ def run_gui():
                 selected_tickers = [macro_sources[i][1] for i in selected_indices]
             macro_info = build_macro_summary(df_ext, selected_tickers=selected_tickers)
 
-            strategy = TradeStrategy()
+            risk_profile, custom_config = get_strategy_config()
+            strategy = TradeStrategy(risk_profile=risk_profile, config_override=custom_config)
             entry_long = support * 1.01
             stop_long = support * 0.98
             take_long = entry_long + (entry_long - stop_long) * strategy.config["rr"]
@@ -895,6 +952,7 @@ def run_gui():
                 signal,
                 short_ema,
                 long_ema,
+                strategy=strategy,
             )
             trend_block = (
                 f"1H支撑/压力: {format_level(support_1h)}/{format_level(resistance_1h)} | "
