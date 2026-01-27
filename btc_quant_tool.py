@@ -1,7 +1,20 @@
 import time
 import warnings
 from datetime import datetime
-from tkinter import BOTH, END, LEFT, RIGHT, Button, Frame, Label, StringVar, Text, Tk, ttk
+from tkinter import (
+    BOTH,
+    END,
+    LEFT,
+    RIGHT,
+    Button,
+    Frame,
+    Label,
+    Listbox,
+    StringVar,
+    Text,
+    Tk,
+    ttk,
+)
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -409,9 +422,9 @@ def summarize_flows(df, timeframe_label):
     )
 
 
-def build_macro_summary(external_df):
+def build_macro_summary(external_df, selected_tickers=None):
     if external_df.empty:
-        return "宏观指标: 数据不足 (请配置数据源)"
+        return "宏观指标: 数据不足 (ai自动选择源)"
 
     def latest_pct_change(ticker, label):
         if isinstance(external_df.columns, pd.MultiIndex):
@@ -428,11 +441,20 @@ def build_macro_summary(external_df):
         pct = (close.iloc[-1] / close.iloc[-2] - 1) * 100
         return f"{label}: {pct:.2f}%"
 
-    sp500 = latest_pct_change("^GSPC", "标普500")
-    dxy = latest_pct_change("DX-Y.NYB", "美元指数")
-    gold = latest_pct_change("GC=F", "黄金")
-    vix = latest_pct_change("^VIX", "VIX")
-    us10y = latest_pct_change("^TNX", "美债10Y")
+    ticker_map = {
+        "^GSPC": ("标普500", latest_pct_change("^GSPC", "标普500")),
+        "DX-Y.NYB": ("美元指数", latest_pct_change("DX-Y.NYB", "美元指数")),
+        "GC=F": ("黄金", latest_pct_change("GC=F", "黄金")),
+        "^VIX": ("VIX", latest_pct_change("^VIX", "VIX")),
+        "^TNX": ("美债10Y", latest_pct_change("^TNX", "美债10Y")),
+    }
+    selected = selected_tickers or list(ticker_map.keys())
+    selected_lines = [ticker_map[key][1] for key in selected if key in ticker_map]
+    if not selected_lines:
+        selected_lines = [value[1] for value in ticker_map.values()]
+
+    sp500 = ticker_map["^GSPC"][1]
+    dxy = ticker_map["DX-Y.NYB"][1]
 
     macro_signal = "风险中性"
     if "标普500" in sp500 and "美元指数" in dxy:
@@ -449,7 +471,7 @@ def build_macro_summary(external_df):
     policy_note = "货币政策: 需接入利率/央行数据"
     return (
         "宏观指标: "
-        f"{sp500} | {dxy} | {gold} | {vix} | {us10y}\n"
+        f"{' | '.join(selected_lines)}\n"
         f"宏观信号: {macro_signal} | {policy_note}"
     )
 
@@ -490,6 +512,13 @@ def run_gui():
 
     interval_var = StringVar(value=INTERVAL)
     refresh_seconds = StringVar(value=str(DEFAULT_REFRESH_SECONDS))
+    macro_sources = [
+        ("标普500", "^GSPC"),
+        ("美元指数", "DX-Y.NYB"),
+        ("黄金", "GC=F"),
+        ("VIX", "^VIX"),
+        ("美债10Y", "^TNX"),
+    ]
 
     control_frame = Frame(root)
     control_frame.pack(fill=BOTH, padx=8, pady=6)
@@ -513,6 +542,12 @@ def run_gui():
         state="readonly",
     )
     refresh_select.pack(side=LEFT, padx=6)
+
+    Label(control_frame, text="宏观指标:").pack(side=LEFT, padx=6)
+    macro_listbox = Listbox(control_frame, selectmode="multiple", height=3, exportselection=False)
+    for label, _ in macro_sources:
+        macro_listbox.insert(END, label)
+    macro_listbox.pack(side=LEFT, padx=6)
 
     status_label = Label(control_frame, text="状态: 等待中")
     status_label.pack(side=RIGHT)
@@ -571,7 +606,11 @@ def run_gui():
             flow_1h = summarize_flows(df_futures_1h, "1H")
             flow_4h = summarize_flows(df_futures_4h, "4H")
             market_state = describe_market_state(price, support_4h, resistance_4h)
-            macro_info = build_macro_summary(df_ext)
+            selected_indices = macro_listbox.curselection()
+            selected_tickers = None
+            if selected_indices:
+                selected_tickers = [macro_sources[i][1] for i in selected_indices]
+            macro_info = build_macro_summary(df_ext, selected_tickers=selected_tickers)
 
             report = build_report(
                 df_btc,
