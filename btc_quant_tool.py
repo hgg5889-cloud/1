@@ -738,9 +738,28 @@ def run_gui():
     for row_id, label in metrics_rows:
         metrics_table.insert("", "end", iid=row_id, values=(label, "—"))
 
-    report_box = Text(root, height=10, wrap="word", font=("TkFixedFont", 10))
-    report_box.pack(fill=BOTH, padx=8, pady=6)
-    report_box.tag_configure("center", justify="center")
+    report_frame = Frame(root)
+    report_frame.pack(fill=BOTH, padx=8, pady=6)
+    Label(report_frame, text="分类输出").pack(side=LEFT, padx=6)
+    report_table = ttk.Treeview(
+        report_frame,
+        columns=("category", "content"),
+        show="headings",
+        height=8,
+    )
+    report_table.heading("category", text="分类")
+    report_table.heading("content", text="内容")
+    report_table.column("category", width=120, anchor="w")
+    report_table.column("content", width=700, anchor="w")
+    report_table.pack(side=LEFT, padx=6)
+    report_rows = [
+        ("market", "行情概览"),
+        ("trend", "趋势/资金流向"),
+        ("macro", "宏观/衍生品"),
+        ("strategy", "交易策略"),
+    ]
+    for row_id, label in report_rows:
+        report_table.insert("", "end", iid=row_id, values=(label, "—"))
 
     account_frame = Frame(root)
     account_frame.pack(fill=BOTH, padx=8, pady=6)
@@ -832,43 +851,28 @@ def run_gui():
                 selected_tickers = [macro_sources[i][1] for i in selected_indices]
             macro_info = build_macro_summary(df_ext, selected_tickers=selected_tickers)
 
-            report = build_report(
-                df_btc,
-                predicted_price,
+            strategy_block = build_strategy_report(
                 price,
+                support,
+                resistance,
                 rsi,
                 macd_line,
                 signal,
-                upper_band,
-                lower_band,
                 short_ema,
                 long_ema,
-                support,
-                resistance,
-                buy_depth=buy_depth,
-                sell_depth=sell_depth,
-                trend_info=(
-                    f"1H支撑/压力: {format_level(support_1h)}/{format_level(resistance_1h)} | "
-                    f"4H支撑/压力: {format_level(support_4h)}/{format_level(resistance_4h)}\n"
-                    f"{trend_1h}\n{trend_4h}\n"
-                    f"{flow_main}\n{flow_1h}\n{flow_4h}"
-                    + (f"\n{flow_interval_summary}" if flow_interval_summary else "")
-                    + f"\n解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。"
-                    + f"\n{build_depth_insights()}"
-                ),
-                macro_info=macro_info,
-                price_change_info=price_change_info,
-                strategy_info=build_strategy_report(
-                    price,
-                    support,
-                    resistance,
-                    rsi,
-                    macd_line,
-                    signal,
-                    short_ema,
-                    long_ema,
-                ),
             )
+            trend_block = (
+                f"1H支撑/压力: {format_level(support_1h)}/{format_level(resistance_1h)} | "
+                f"4H支撑/压力: {format_level(support_4h)}/{format_level(resistance_4h)}\n"
+                f"{trend_1h}\n{trend_4h}\n"
+                f"{flow_main}\n{flow_1h}\n{flow_4h}"
+                + (f"\n{flow_interval_summary}" if flow_interval_summary else "")
+                + f"\n解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。"
+            )
+            report_table.set("market", "content", f"{price_change_info} | 深度: {len(buy_depth)}/{len(sell_depth)}")
+            report_table.set("trend", "content", trend_block)
+            report_table.set("macro", "content", f"{macro_info}\n{build_depth_insights()}")
+            report_table.set("strategy", "content", strategy_block)
             metrics_table.set("price", "value", f"{price:.2f}")
             metrics_table.set("delta", "value", f"{delta:+.2f} ({delta_pct:+.2f}%)")
             metrics_table.set("support", "value", format_level(support))
@@ -878,9 +882,6 @@ def run_gui():
             metrics_table.set("support_4h", "value", format_level(support_4h))
             metrics_table.set("resistance_4h", "value", format_level(resistance_4h))
 
-            report_box.delete("1.0", END)
-            report_box.insert(END, report)
-            report_box.tag_add("center", "1.0", END)
             levels = [
                 (f"{interval.upper()}支撑", support, "tab:green"),
                 (f"{interval.upper()}压力", resistance, "tab:red"),
