@@ -13,6 +13,7 @@ from sklearn.preprocessing import MinMaxScaler
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
 from ta.volatility import BollingerBands
+from ta.volume import MFIIndicator, OnBalanceVolumeIndicator
 from tensorflow.keras.layers import Dense, Input, LSTM
 from tensorflow.keras.models import Sequential
 
@@ -25,6 +26,17 @@ BINANCE_FUTURES_BASE = "https://fapi.binance.com/fapi/v1"
 SYMBOL = "BTCUSDT"
 INTERVAL = "4h"  # 4小时数据
 DEFAULT_REFRESH_SECONDS = 5
+SUPPORTED_INTERVALS = [
+    "1m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "12h",
+    "1d",
+]
 
 
 # 获取实时价格数据
@@ -74,7 +86,7 @@ def fetch_klines(symbol, interval="4h", limit=500):
 def fetch_external_data(max_retries=3, backoff_seconds=2):
     for attempt in range(1, max_retries + 1):
         try:
-            tickers = ["^GSPC", "DX-Y.NYB", "GC=F"]
+            tickers = ["^GSPC", "DX-Y.NYB", "GC=F", "^VIX", "^TNX"]
             data = yf.download(
                 tickers,
                 start="2022-01-01",
@@ -260,6 +272,8 @@ def merge_market_data(btc_df, external_df, resample_rule="4H"):
             "^GSPC": "sp500_close",
             "DX-Y.NYB": "dxy_close",
             "GC=F": "gold_close",
+            "^VIX": "vix_close",
+            "^TNX": "us10y_close",
         }
     )
     external_close.index = pd.to_datetime(external_close.index)
@@ -268,10 +282,25 @@ def merge_market_data(btc_df, external_df, resample_rule="4H"):
     return merged
 
 
+def interval_to_resample_rule(interval):
+    mapping = {
+        "1m": "1T",
+        "5m": "5T",
+        "15m": "15T",
+        "30m": "30T",
+        "1h": "1H",
+        "2h": "2H",
+        "4h": "4H",
+        "12h": "12H",
+        "1d": "1D",
+    }
+    return mapping.get(interval, "4H")
+
+
 def collect_data(interval=INTERVAL):
     df_btc = fetch_klines(SYMBOL, interval)
     df_ext = fetch_external_data()  # 获取外部经济数据
-    resample_rule = "1H" if interval == "1h" else "4H"
+    resample_rule = interval_to_resample_rule(interval)
     merged = merge_market_data(df_btc, df_ext, resample_rule=resample_rule)
     return merged, df_ext
 
@@ -293,6 +322,7 @@ def build_report(
     buy_depth=None,
     sell_depth=None,
     trend_info=None,
+    macro_info=None,
 ):
     def fmt(value):
         return f"{value:.2f}" if pd.notna(value) else "N/A"
@@ -311,6 +341,8 @@ def build_report(
     lines.append(f"趋势: {trend}")
     if trend_info:
         lines.append(trend_info)
+    if macro_info:
+        lines.append(macro_info)
     return "\n".join(lines)
 
 
@@ -354,6 +386,71 @@ def analyze_trend(df, timeframe_label):
         f"{timeframe_label}趋势判断: {trend} | RSI: {rsi:.2f} | "
         f"均线: MA20 {short_ma:.2f} / MA50 {long_ma:.2f} | "
         f"成交量: {vol_state} | 信号: {signal}"
+    )
+
+
+def summarize_flows(df, timeframe_label):
+    if df.empty or len(df) < 2:
+        return f"{timeframe_label}资金流向: 数据不足"
+    mfi = MFIIndicator(
+        high=df["high"],
+        low=df["low"],
+        close=df["close"],
+        volume=df["volume"],
+        window=14,
+    ).money_flow_index()
+    obv = OnBalanceVolumeIndicator(close=df["close"], volume=df["volume"]).on_balance_volume()
+    mfi_value = mfi.iloc[-1]
+    obv_change = obv.iloc[-1] - obv.iloc[-2]
+    flow_state = "流入" if obv_change > 0 else "流出" if obv_change < 0 else "平衡"
+    return (
+        f"{timeframe_label}资金流向: MFI {format_level(mfi_value)} | "
+        f"OBV变化 {format_level(obv_change)} ({flow_state})"
+    )
+
+
+def build_macro_summary(external_df):
+    if external_df.empty:
+        return "宏观指标: 数据不足 (请配置数据源)"
+
+    def latest_pct_change(ticker, label):
+        if isinstance(external_df.columns, pd.MultiIndex):
+            series = external_df.get(ticker)
+            if series is None:
+                return f"{label}: N/A"
+            close = series["Close"].dropna()
+        else:
+            if "Close" not in external_df.columns:
+                return f"{label}: N/A"
+            close = external_df["Close"].dropna()
+        if len(close) < 2:
+            return f"{label}: N/A"
+        pct = (close.iloc[-1] / close.iloc[-2] - 1) * 100
+        return f"{label}: {pct:.2f}%"
+
+    sp500 = latest_pct_change("^GSPC", "标普500")
+    dxy = latest_pct_change("DX-Y.NYB", "美元指数")
+    gold = latest_pct_change("GC=F", "黄金")
+    vix = latest_pct_change("^VIX", "VIX")
+    us10y = latest_pct_change("^TNX", "美债10Y")
+
+    macro_signal = "风险中性"
+    if "标普500" in sp500 and "美元指数" in dxy:
+        try:
+            sp500_val = float(sp500.split(":")[1].replace("%", ""))
+            dxy_val = float(dxy.split(":")[1].replace("%", ""))
+            if sp500_val > 0 and dxy_val < 0:
+                macro_signal = "风险偏好"
+            elif sp500_val < 0 and dxy_val > 0:
+                macro_signal = "风险规避"
+        except ValueError:
+            macro_signal = "风险中性"
+
+    policy_note = "货币政策: 需接入利率/央行数据"
+    return (
+        "宏观指标: "
+        f"{sp500} | {dxy} | {gold} | {vix} | {us10y}\n"
+        f"宏观信号: {macro_signal} | {policy_note}"
     )
 
 
@@ -401,7 +498,7 @@ def run_gui():
     interval_select = ttk.Combobox(
         control_frame,
         textvariable=interval_var,
-        values=["1h", "4h"],
+        values=SUPPORTED_INTERVALS,
         width=6,
         state="readonly",
     )
@@ -470,7 +567,11 @@ def run_gui():
             )
             trend_1h = analyze_trend(df_futures_1h, "1H")
             trend_4h = analyze_trend(df_futures_4h, "4H")
+            flow_main = summarize_flows(df_btc, interval.upper())
+            flow_1h = summarize_flows(df_futures_1h, "1H")
+            flow_4h = summarize_flows(df_futures_4h, "4H")
             market_state = describe_market_state(price, support_4h, resistance_4h)
+            macro_info = build_macro_summary(df_ext)
 
             report = build_report(
                 df_btc,
@@ -491,8 +592,10 @@ def run_gui():
                     f"1H支撑/压力: {format_level(support_1h)}/{format_level(resistance_1h)} | "
                     f"4H支撑/压力: {format_level(support_4h)}/{format_level(resistance_4h)}\n"
                     f"{trend_1h}\n{trend_4h}\n"
+                    f"{flow_main}\n{flow_1h}\n{flow_4h}\n"
                     f"解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。"
                 ),
+                macro_info=macro_info,
             )
             report_box.delete("1.0", END)
             report_box.insert(END, report)
@@ -569,7 +672,11 @@ def monitor():
             )
             trend_1h = analyze_trend(df_futures_1h, "1H")
             trend_4h = analyze_trend(df_futures_4h, "4H")
+            flow_main = summarize_flows(df_btc, INTERVAL.upper())
+            flow_1h = summarize_flows(df_futures_1h, "1H")
+            flow_4h = summarize_flows(df_futures_4h, "4H")
             market_state = describe_market_state(price, support_4h, resistance_4h)
+            macro_info = build_macro_summary(df_ext)
 
             # 输出报告
             generate_report(
@@ -591,8 +698,10 @@ def monitor():
                     f"1H支撑/压力: {format_level(support_1h)}/{format_level(resistance_1h)} | "
                     f"4H支撑/压力: {format_level(support_4h)}/{format_level(resistance_4h)}\n"
                     f"{trend_1h}\n{trend_4h}\n"
+                    f"{flow_main}\n{flow_1h}\n{flow_4h}\n"
                     f"解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。"
                 ),
+                macro_info=macro_info,
             )
 
             # 可视化
