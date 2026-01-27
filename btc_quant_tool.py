@@ -141,6 +141,29 @@ def get_order_book(symbol="BTCUSDT", depth_limit=1000):
         return [], []  # 如果请求失败，返回空列表
 
 
+def compute_order_book_signal(buy_depth, sell_depth):
+    if not buy_depth or not sell_depth:
+        return None
+    try:
+        bid_prices = np.array([float(item[0]) for item in buy_depth])
+        bid_qty = np.array([float(item[1]) for item in buy_depth])
+        ask_prices = np.array([float(item[0]) for item in sell_depth])
+        ask_qty = np.array([float(item[1]) for item in sell_depth])
+    except (ValueError, TypeError):
+        return None
+
+    bid_value = np.sum(bid_prices * bid_qty)
+    ask_value = np.sum(ask_prices * ask_qty)
+    total_value = bid_value + ask_value
+    if total_value <= 0:
+        return None
+    imbalance = (bid_value - ask_value) / total_value
+    bid_vwap = bid_value / max(np.sum(bid_qty), 1e-9)
+    ask_vwap = ask_value / max(np.sum(ask_qty), 1e-9)
+    weighted_mid = (bid_vwap + ask_vwap) / 2
+    return {"imbalance": imbalance, "weighted_mid": weighted_mid}
+
+
 def fetch_futures_klines(symbol, interval="1h", limit=500):
     url = (
         f"{BINANCE_FUTURES_BASE}/continuousKlines"
@@ -641,7 +664,7 @@ def format_level(value):
 
 
 # 可视化价格与预测结果
-def plot_graph(ax, df, predicted_price, levels=None):
+def plot_graph(ax, df, predicted_price, levels=None, trend_outlook=None):
     ax.clear()
     view = df.tail(PLOT_POINTS)
     ax.plot(view["close"], label="实际价格")
@@ -662,6 +685,16 @@ def plot_graph(ax, df, predicted_price, levels=None):
                 verticalalignment="bottom",
                 horizontalalignment="right",
             )
+    if trend_outlook:
+        ax.text(
+            0.02,
+            0.95,
+            f"预测趋势: {trend_outlook}",
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
+        )
     ax.legend(loc="best")
     ax.set_title("BTC价格与预测结果")
 
@@ -912,9 +945,16 @@ def run_gui():
                 short_ema,
                 long_ema,
             ) = compute_indicators(df_btc)
-            predicted_price = train_lstm(df_btc, model_type=model_var.get())
-            trend_outlook = "看涨" if predicted_price > price else "看跌"
+            predicted_price_raw = train_lstm(df_btc, model_type=model_var.get())
             buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
+            depth_signal = compute_order_book_signal(buy_depth, sell_depth)
+            if depth_signal:
+                blended = 0.7 * predicted_price_raw + 0.3 * depth_signal["weighted_mid"]
+                predicted_price = blended * (1 + depth_signal["imbalance"] * 0.002)
+            else:
+                predicted_price = predicted_price_raw
+            trend_outlook = "看涨" if predicted_price > price else "看跌"
+            trend_outlook = "看涨" if predicted_price > price else "看跌"
             support, resistance = calculate_support_resistance(
                 df_btc,
                 buy_depth=buy_depth,
@@ -1027,7 +1067,7 @@ def run_gui():
                 ("4H支撑", support_4h, "tab:olive"),
                 ("4H压力", resistance_4h, "tab:brown"),
             ]
-            plot_graph(ax, df_btc, predicted_price, levels=levels)
+            plot_graph(ax, df_btc, predicted_price, levels=levels, trend_outlook=trend_outlook)
             canvas.draw()
             status_label.config(text=f"状态: 已更新 {datetime.now().strftime('%H:%M:%S')}")
 
@@ -1166,10 +1206,16 @@ def monitor():
             ) = compute_indicators(df_btc)
 
             # LSTM预测
-            predicted_price = train_lstm(df_btc)
+            predicted_price_raw = train_lstm(df_btc)
 
             # 市场深度
             buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
+            depth_signal = compute_order_book_signal(buy_depth, sell_depth)
+            if depth_signal:
+                blended = 0.7 * predicted_price_raw + 0.3 * depth_signal["weighted_mid"]
+                predicted_price = blended * (1 + depth_signal["imbalance"] * 0.002)
+            else:
+                predicted_price = predicted_price_raw
 
             # 支撑位和阻力位
             support, resistance = calculate_support_resistance(
@@ -1245,7 +1291,7 @@ def monitor():
                 ("4H支撑", support_4h, "tab:olive"),
                 ("4H压力", resistance_4h, "tab:brown"),
             ]
-            plot_graph(ax, df_btc, predicted_price, levels=levels)
+            plot_graph(ax, df_btc, predicted_price, levels=levels, trend_outlook=trend_outlook)
             plt.show()
 
             # 每5秒更新一次
