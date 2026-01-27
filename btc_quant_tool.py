@@ -512,9 +512,24 @@ def build_macro_summary(external_df, selected_tickers=None):
 
 def build_depth_insights():
     return (
-        "衍生品/资金指标: "
-        "杠杆借贷存量增速 N/A | 杠杆多空比 N/A | 大单净流入(BTC) N/A | "
-        "主力净流入 N/A | 持仓集中度 N/A | 逐仓借贷比 N/A | 24h资金净流入 N/A"
+        "衍生品/资金指标:\n"
+        "- 杠杆借贷存量增速: 24h N/A | 30天 N/A\n"
+        "- 杠杆多空比: 24h N/A | 30天 N/A\n"
+        "- 5 x 24小时大单净流入(BTC): N/A\n"
+        "- 5日主力净流入: N/A\n"
+        "- 场内持仓集中度(BTC): 24h N/A | 30天 N/A\n"
+        "- 逐仓借贷比: 24h N/A | 30天 N/A\n"
+        "- 24小时资金净流入(BTC): N/A\n"
+        "_________________________________________\n"
+        "分时/图表:\n"
+        "- 1秒 | 15分钟 | 1小时 | 4小时 | 1日 | 1周 | 基本版 | Trading View | 深度图\n"
+        "主图指标:\n"
+        "- MA | EMA | WMA | BOLL | VWAP | AVL | TRIX | SAR | SUPER\n"
+        "副图指标:\n"
+        "- VOL | MACD | RSI | MFI | KDJ | OBV | CCI | StochRSI | WR | DMI | MTM | EMV\n"
+        "合约数据:\n"
+        "- 合约持仓量(双边) | 大户账户数多空比 | 大户持仓量多空比 | 多空账户数比\n"
+        "- 合约主动买卖量 | 基差 | 资金费率: 0.007503% (最近40次) | 未平仓量与市值比率"
     )
 
 
@@ -739,6 +754,7 @@ def run_gui():
     for label, _ in flow_sources:
         flow_listbox.insert(END, label)
     flow_listbox.pack(side=LEFT, padx=6)
+    flow_listbox.select_set(0, END)
 
     status_label = Label(control_frame, text="状态: 手动刷新")
     status_label.pack(side=RIGHT)
@@ -774,7 +790,7 @@ def run_gui():
         metrics_frame,
         columns=("label", "value"),
         show="headings",
-        height=6,
+        height=8,
     )
     metrics_table.heading("label", text="指标")
     metrics_table.heading("value", text="数值")
@@ -783,6 +799,8 @@ def run_gui():
     metrics_table.pack(side=LEFT, padx=6)
     metrics_rows = [
         ("price", "当前价"),
+        ("predicted", "预测价"),
+        ("trend", "看涨/看跌"),
         ("delta", "涨跌幅"),
         ("support", "支撑位"),
         ("resistance", "压力位"),
@@ -895,6 +913,7 @@ def run_gui():
                 long_ema,
             ) = compute_indicators(df_btc)
             predicted_price = train_lstm(df_btc, model_type=model_var.get())
+            trend_outlook = "看涨" if predicted_price > price else "看跌"
             buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
             support, resistance = calculate_support_resistance(
                 df_btc,
@@ -962,7 +981,14 @@ def run_gui():
                 + (f"\n{flow_interval_summary}" if flow_interval_summary else "")
                 + f"\n解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。"
             )
-            report_table.set("market", "content", f"{price_change_info} | 深度: {len(buy_depth)}/{len(sell_depth)}")
+            report_table.set(
+                "market",
+                "content",
+                (
+                    f"{price_change_info} | 预测价: {predicted_price:.2f} | "
+                    f"趋势: {trend_outlook} | 深度: {len(buy_depth)}/{len(sell_depth)}"
+                ),
+            )
             report_table.set("trend", "content", trend_block)
             report_table.set("macro", "content", f"{macro_info}\n{build_depth_insights()}")
             report_table.set("strategy", "content", strategy_block)
@@ -983,6 +1009,8 @@ def run_gui():
             strategy_table.set("short", "take", f"{take_short:.2f}")
             strategy_table.set("short", "amount", f"{amount_short:.2f} USDT")
             metrics_table.set("price", "value", f"{price:.2f}")
+            metrics_table.set("predicted", "value", f"{predicted_price:.2f}")
+            metrics_table.set("trend", "value", trend_outlook)
             metrics_table.set("delta", "value", f"{delta:+.2f} ({delta_pct:+.2f}%)")
             metrics_table.set("support", "value", format_level(support))
             metrics_table.set("resistance", "value", format_level(resistance))
