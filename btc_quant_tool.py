@@ -215,13 +215,28 @@ def compute_macro_bias(external_df):
 
     sp500 = latest_pct_change("^GSPC")
     dxy = latest_pct_change("DX-Y.NYB")
+    gold = latest_pct_change("GC=F")
+    vix = latest_pct_change("^VIX")
+    us10y = latest_pct_change("^TNX")
+
     if sp500 is None or dxy is None:
-        return 0.0
-    if sp500 > 0 and dxy < 0:
-        return 0.2
-    if sp500 < 0 and dxy > 0:
-        return -0.2
-    return 0.0
+        base_bias = 0.0
+    elif sp500 > 0 and dxy < 0:
+        base_bias = 0.2
+    elif sp500 < 0 and dxy > 0:
+        base_bias = -0.2
+    else:
+        base_bias = 0.0
+
+    extra_bias = 0.0
+    if gold is not None:
+        extra_bias += gold * 0.01
+    if vix is not None:
+        extra_bias -= vix * 0.02
+    if us10y is not None:
+        extra_bias -= us10y * 0.01
+
+    return base_bias + extra_bias
 
 
 def compute_prediction_metrics(
@@ -264,6 +279,24 @@ def compute_prediction_metrics(
     else:
         volume_bias = 0.0
 
+    flow_bias = 0.0
+    if len(df) >= 15:
+        mfi = MFIIndicator(
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            volume=df["volume"],
+            window=14,
+        ).money_flow_index()
+        obv = OnBalanceVolumeIndicator(close=df["close"], volume=df["volume"]).on_balance_volume()
+        if len(mfi.dropna()) >= 1:
+            flow_bias += (mfi.iloc[-1] - 50) / 50
+        if len(obv) >= 2:
+            obv_change = obv.iloc[-1] - obv.iloc[-2]
+            obv_scale = df["volume"].tail(20).mean() if len(df) >= 20 else df["volume"].mean()
+            if obv_scale:
+                flow_bias += obv_change / obv_scale * 0.01
+
     band_bias = 0.0
     if upper_band is not None and lower_band is not None and pd.notna(upper_band) and pd.notna(lower_band):
         band_width = upper_band - lower_band
@@ -299,6 +332,7 @@ def compute_prediction_metrics(
         + 0.1 * rsi_bias
         + 0.1 * price_bias
         + 0.05 * volume_bias
+        + 0.05 * flow_bias
         + 0.05 * band_bias
         + 0.05 * range_bias
         + 0.05 * external_bias
