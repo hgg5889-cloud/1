@@ -11,7 +11,7 @@ from sklearn.preprocessing import MinMaxScaler
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
 from ta.volatility import BollingerBands
-from tensorflow.keras.layers import Dense, LSTM
+from tensorflow.keras.layers import Dense, Input, LSTM
 from tensorflow.keras.models import Sequential
 
 # 忽略 tkinter 字体警告
@@ -24,7 +24,7 @@ INTERVAL = "4h"  # 4小时数据
 
 
 # 获取实时价格数据
-def fetch_klines(symbol, interval="4h", limit=100):
+def fetch_klines(symbol, interval="4h", limit=300):
     url = f"{BINANCE_BASE}/klines?symbol={symbol}&interval={interval}&limit={limit}"
 
     try:
@@ -67,12 +67,20 @@ def fetch_klines(symbol, interval="4h", limit=100):
 
 
 # 获取外部经济数据
-def fetch_external_data():
-    try:
-        return yf.download("^GSPC", start="2022-01-01", end=datetime.today().strftime("%Y-%m-%d"))
-    except Exception as error:
-        print(f"获取外部数据失败: {error}")
-        return pd.DataFrame()
+def fetch_external_data(max_retries=3, backoff_seconds=2):
+    for attempt in range(1, max_retries + 1):
+        try:
+            return yf.download(
+                "^GSPC",
+                start="2022-01-01",
+                end=datetime.today().strftime("%Y-%m-%d"),
+                progress=False,
+            )
+        except Exception as error:
+            print(f"获取外部数据失败(第{attempt}次): {error}")
+            if attempt < max_retries:
+                time.sleep(backoff_seconds * attempt)
+    return pd.DataFrame()
 
 
 # 获取市场深度数据
@@ -116,6 +124,9 @@ def train_lstm(df):
     df_close = df["close"].values.reshape(-1, 1)
     data_scaled, scaler = scale_data(df_close)
 
+    if len(data_scaled) <= 60:
+        return float(df["close"].iloc[-1])
+
     X, y = [], []
     for i in range(60, len(data_scaled)):
         X.append(data_scaled[i - 60 : i, 0])
@@ -126,10 +137,14 @@ def train_lstm(df):
 
     X = X.reshape(X.shape[0], X.shape[1], 1)
 
-    model = Sequential()
-    model.add(LSTM(units=50, return_sequences=True, input_shape=(X.shape[1], 1)))
-    model.add(LSTM(units=50, return_sequences=False))
-    model.add(Dense(units=1))
+    model = Sequential(
+        [
+            Input(shape=(X.shape[1], 1)),
+            LSTM(units=50, return_sequences=True),
+            LSTM(units=50, return_sequences=False),
+            Dense(units=1),
+        ]
+    )
 
     model.compile(optimizer="adam", loss="mean_squared_error")
     model.fit(X, y, epochs=1, batch_size=1, verbose=2)
@@ -153,8 +168,11 @@ def _parse_depth_levels(levels, limit=10):
 
 def calculate_support_resistance(df, buy_depth=None, sell_depth=None, window=200):
     recent = df.tail(window) if len(df) > window else df
-    highs = recent["high"].values
-    lows = recent["low"].values
+    highs = recent["high"].dropna().values
+    lows = recent["low"].dropna().values
+
+    if highs.size == 0 or lows.size == 0:
+        return float("nan"), float("nan")
 
     # 使用分位数降低极值影响
     support_quantile = float(np.nanquantile(lows, 0.1))
@@ -204,15 +222,19 @@ def generate_report(
     buy_depth=None,
     sell_depth=None,
 ):
-    print(f"价格: {price:.2f}")
-    print(f"预测价格: {predicted_price:.2f}")
-    print(f"支撑位: {support:.2f} 阻力位: {resistance:.2f}")
+    def fmt(value):
+        return f"{value:.2f}" if pd.notna(value) else "N/A"
+
+    print(f"价格: {fmt(price)}")
+    print(f"预测价格: {fmt(predicted_price)}")
+    print(f"支撑位: {fmt(support)} 阻力位: {fmt(resistance)}")
     if buy_depth and sell_depth:
         print(f"深度: 买盘{len(buy_depth)} 档 / 卖盘{len(sell_depth)} 档")
     print(f"RSI: {rsi:.2f}  MACD: {macd_line:.4f}/{signal:.4f}")
-    print(f"布林带: 上轨: {upper_band:.2f} 下轨: {lower_band:.2f}")
-    print(f"EMA: 短期: {short_ema:.2f} 长期: {long_ema:.2f}")
-    print(f"趋势: {'看涨' if predicted_price > price else '看跌'}")
+    print(f"布林带: 上轨: {fmt(upper_band)} 下轨: {fmt(lower_band)}")
+    print(f"EMA: 短期: {fmt(short_ema)} 长期: {fmt(long_ema)}")
+    trend = "看涨" if predicted_price > price else "看跌"
+    print(f"趋势: {trend}")
 
 
 # 可视化价格与预测结果
