@@ -141,7 +141,7 @@ def get_order_book(symbol="BTCUSDT", depth_limit=1000):
         return [], []  # 如果请求失败，返回空列表
 
 
-def compute_order_book_signal(buy_depth, sell_depth):
+def compute_order_book_signal(buy_depth, sell_depth, mid_price=None):
     if not buy_depth or not sell_depth:
         return None
     try:
@@ -152,16 +152,132 @@ def compute_order_book_signal(buy_depth, sell_depth):
     except (ValueError, TypeError):
         return None
 
+    best_bid = np.max(bid_prices)
+    best_ask = np.min(ask_prices)
+    mid = (best_bid + best_ask) / 2
+    ref_mid = mid_price or mid
+
     bid_value = np.sum(bid_prices * bid_qty)
     ask_value = np.sum(ask_prices * ask_qty)
     total_value = bid_value + ask_value
     if total_value <= 0:
         return None
-    imbalance = (bid_value - ask_value) / total_value
+
     bid_vwap = bid_value / max(np.sum(bid_qty), 1e-9)
     ask_vwap = ask_value / max(np.sum(ask_qty), 1e-9)
     weighted_mid = (bid_vwap + ask_vwap) / 2
-    return {"imbalance": imbalance, "weighted_mid": weighted_mid}
+
+    distance_bid = np.abs(bid_prices - ref_mid) / max(ref_mid, 1e-9)
+    distance_ask = np.abs(ask_prices - ref_mid) / max(ref_mid, 1e-9)
+    bid_weights = 1 / (1 + distance_bid * 100)
+    ask_weights = 1 / (1 + distance_ask * 100)
+    bid_pressure = np.sum(bid_qty * bid_weights)
+    ask_pressure = np.sum(ask_qty * ask_weights)
+    pressure_total = bid_pressure + ask_pressure
+    if pressure_total <= 0:
+        pressure = 0.0
+    else:
+        pressure = (bid_pressure - ask_pressure) / pressure_total
+
+    imbalance = (bid_value - ask_value) / total_value
+    top_n = min(5, len(bid_qty), len(ask_qty))
+    top_bid_qty = np.sum(bid_qty[:top_n])
+    top_ask_qty = np.sum(ask_qty[:top_n])
+    micro_price = (best_ask * top_bid_qty + best_bid * top_ask_qty) / max(
+        top_bid_qty + top_ask_qty, 1e-9
+    )
+
+    return {
+        "imbalance": imbalance,
+        "weighted_mid": weighted_mid,
+        "micro_price": micro_price,
+        "pressure": pressure,
+    }
+
+
+def compute_macro_bias(external_df):
+    if external_df.empty:
+        return 0.0
+
+    def latest_pct_change(ticker):
+        if isinstance(external_df.columns, pd.MultiIndex):
+            series = external_df.get(ticker)
+            if series is None:
+                return None
+            close = series["Close"].dropna()
+        else:
+            if "Close" not in external_df.columns:
+                return None
+            close = external_df["Close"].dropna()
+        if len(close) < 2:
+            return None
+        return (close.iloc[-1] / close.iloc[-2] - 1) * 100
+
+    sp500 = latest_pct_change("^GSPC")
+    dxy = latest_pct_change("DX-Y.NYB")
+    if sp500 is None or dxy is None:
+        return 0.0
+    if sp500 > 0 and dxy < 0:
+        return 0.2
+    if sp500 < 0 and dxy > 0:
+        return -0.2
+    return 0.0
+
+
+def compute_prediction_metrics(
+    df,
+    price,
+    predicted_price_raw,
+    rsi,
+    macd_line,
+    signal,
+    short_ema,
+    long_ema,
+    depth_signal=None,
+    macro_bias=0.0,
+):
+    base_prediction = predicted_price_raw
+    depth_bias = 0.0
+    if depth_signal:
+        base_prediction = (
+            0.55 * predicted_price_raw
+            + 0.25 * depth_signal["weighted_mid"]
+            + 0.20 * depth_signal["micro_price"]
+        )
+        depth_bias = 0.6 * depth_signal["pressure"] + 0.4 * depth_signal["imbalance"]
+
+    ema_trend = (short_ema - long_ema) / price if price else 0.0
+    macd_trend = (macd_line - signal) / price if price else 0.0
+    rsi_bias = (rsi - 50) / 50
+    if len(df) >= 6:
+        price_bias = (df["close"].iloc[-1] - df["close"].iloc[-6]) / df["close"].iloc[-6]
+    else:
+        price_bias = 0.0
+    if len(df) >= 20:
+        recent_volume = df["volume"].tail(5).mean()
+        avg_volume = df["volume"].tail(20).mean()
+        volume_bias = (recent_volume / avg_volume - 1) if avg_volume else 0.0
+    else:
+        volume_bias = 0.0
+
+    composite = (
+        0.35 * depth_bias
+        + 0.2 * ema_trend
+        + 0.15 * macd_trend
+        + 0.1 * rsi_bias
+        + 0.1 * price_bias
+        + 0.1 * volume_bias
+        + 0.1 * macro_bias
+    )
+    composite = float(np.clip(composite, -0.04, 0.04))
+    predicted_price = base_prediction * (1 + composite)
+
+    delta = predicted_price - price
+    pct = (delta / price * 100) if price else 0.0
+    outlook = "看涨" if delta >= 0 else "看跌"
+    direction = "上涨" if delta >= 0 else "下跌"
+    prediction_text = f"预测{direction}: {delta:+.2f} ({pct:+.2f}%)"
+    return predicted_price, outlook, prediction_text
 
 
 def fetch_futures_klines(symbol, interval="1h", limit=500):
@@ -379,6 +495,7 @@ def build_report(
     trend_info=None,
     macro_info=None,
     price_change_info=None,
+    prediction_info=None,
     strategy_info=None,
 ):
     def fmt(value):
@@ -391,6 +508,8 @@ def build_report(
     ]
     if price_change_info:
         lines.append(price_change_info)
+    if prediction_info:
+        lines.append(prediction_info)
     if buy_depth and sell_depth:
         lines.append(f"深度: 买盘{len(buy_depth)} 档 / 卖盘{len(sell_depth)} 档")
     lines.append(f"RSI: {rsi:.2f}  MACD: {macd_line:.4f}/{signal:.4f}")
@@ -664,7 +783,7 @@ def format_level(value):
 
 
 # 可视化价格与预测结果
-def plot_graph(ax, df, predicted_price, levels=None, trend_outlook=None):
+def plot_graph(ax, df, predicted_price, levels=None, trend_outlook=None, prediction_text=None):
     ax.clear()
     view = df.tail(PLOT_POINTS)
     ax.plot(view["close"], label="实际价格")
@@ -690,6 +809,16 @@ def plot_graph(ax, df, predicted_price, levels=None, trend_outlook=None):
             0.02,
             0.95,
             f"预测趋势: {trend_outlook}",
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment="top",
+            bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
+        )
+    if prediction_text:
+        ax.text(
+            0.02,
+            0.9,
+            prediction_text,
             transform=ax.transAxes,
             fontsize=9,
             verticalalignment="top",
@@ -833,6 +962,7 @@ def run_gui():
     metrics_rows = [
         ("price", "当前价"),
         ("predicted", "预测价"),
+        ("prediction_move", "预测涨跌"),
         ("trend", "看涨/看跌"),
         ("delta", "涨跌幅"),
         ("support", "支撑位"),
@@ -947,14 +1077,24 @@ def run_gui():
             ) = compute_indicators(df_btc)
             predicted_price_raw = train_lstm(df_btc, model_type=model_var.get())
             buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
-            depth_signal = compute_order_book_signal(buy_depth, sell_depth)
-            if depth_signal:
-                blended = 0.7 * predicted_price_raw + 0.3 * depth_signal["weighted_mid"]
-                predicted_price = blended * (1 + depth_signal["imbalance"] * 0.002)
-            else:
-                predicted_price = predicted_price_raw
-            trend_outlook = "看涨" if predicted_price > price else "看跌"
-            trend_outlook = "看涨" if predicted_price > price else "看跌"
+            depth_signal = compute_order_book_signal(buy_depth, sell_depth, mid_price=price)
+            macro_bias = compute_macro_bias(df_ext)
+            (
+                predicted_price,
+                trend_outlook,
+                prediction_text,
+            ) = compute_prediction_metrics(
+                df_btc,
+                price,
+                predicted_price_raw,
+                rsi,
+                macd_line,
+                signal,
+                short_ema,
+                long_ema,
+                depth_signal=depth_signal,
+                macro_bias=macro_bias,
+            )
             support, resistance = calculate_support_resistance(
                 df_btc,
                 buy_depth=buy_depth,
@@ -1026,7 +1166,7 @@ def run_gui():
                 "content",
                 (
                     f"{price_change_info} | 预测价: {predicted_price:.2f} | "
-                    f"趋势: {trend_outlook} | 深度: {len(buy_depth)}/{len(sell_depth)}"
+                    f"{prediction_text} | 趋势: {trend_outlook} | 深度: {len(buy_depth)}/{len(sell_depth)}"
                 ),
             )
             report_table.set("trend", "content", trend_block)
@@ -1050,6 +1190,7 @@ def run_gui():
             strategy_table.set("short", "amount", f"{amount_short:.2f} USDT")
             metrics_table.set("price", "value", f"{price:.2f}")
             metrics_table.set("predicted", "value", f"{predicted_price:.2f}")
+            metrics_table.set("prediction_move", "value", prediction_text)
             metrics_table.set("trend", "value", trend_outlook)
             metrics_table.set("delta", "value", f"{delta:+.2f} ({delta_pct:+.2f}%)")
             metrics_table.set("support", "value", format_level(support))
@@ -1067,7 +1208,14 @@ def run_gui():
                 ("4H支撑", support_4h, "tab:olive"),
                 ("4H压力", resistance_4h, "tab:brown"),
             ]
-            plot_graph(ax, df_btc, predicted_price, levels=levels, trend_outlook=trend_outlook)
+            plot_graph(
+                ax,
+                df_btc,
+                predicted_price,
+                levels=levels,
+                trend_outlook=trend_outlook,
+                prediction_text=prediction_text,
+            )
             canvas.draw()
             status_label.config(text=f"状态: 已更新 {datetime.now().strftime('%H:%M:%S')}")
 
@@ -1210,12 +1358,20 @@ def monitor():
 
             # 市场深度
             buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
-            depth_signal = compute_order_book_signal(buy_depth, sell_depth)
-            if depth_signal:
-                blended = 0.7 * predicted_price_raw + 0.3 * depth_signal["weighted_mid"]
-                predicted_price = blended * (1 + depth_signal["imbalance"] * 0.002)
-            else:
-                predicted_price = predicted_price_raw
+            depth_signal = compute_order_book_signal(buy_depth, sell_depth, mid_price=price)
+            macro_bias = compute_macro_bias(df_ext)
+            predicted_price, trend_outlook, prediction_text = compute_prediction_metrics(
+                df_btc,
+                price,
+                predicted_price_raw,
+                rsi,
+                macd_line,
+                signal,
+                short_ema,
+                long_ema,
+                depth_signal=depth_signal,
+                macro_bias=macro_bias,
+            )
 
             # 支撑位和阻力位
             support, resistance = calculate_support_resistance(
@@ -1268,6 +1424,7 @@ def monitor():
                 ),
                 macro_info=macro_info,
                 price_change_info=price_change_info,
+                prediction_info=prediction_text,
                 strategy_info=build_strategy_report(
                     price,
                     support,
@@ -1291,7 +1448,14 @@ def monitor():
                 ("4H支撑", support_4h, "tab:olive"),
                 ("4H压力", resistance_4h, "tab:brown"),
             ]
-            plot_graph(ax, df_btc, predicted_price, levels=levels, trend_outlook=trend_outlook)
+            plot_graph(
+                ax,
+                df_btc,
+                predicted_price,
+                levels=levels,
+                trend_outlook=trend_outlook,
+                prediction_text=prediction_text,
+            )
             plt.show()
 
             # 每5秒更新一次
