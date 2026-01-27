@@ -1,12 +1,14 @@
 import time
 import warnings
 from datetime import datetime
+from tkinter import BOTH, END, LEFT, RIGHT, Button, Frame, Label, StringVar, Text, Tk, ttk
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from sklearn.preprocessing import MinMaxScaler
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
@@ -22,6 +24,7 @@ BINANCE_BASE = "https://api.binance.com/api/v3"
 BINANCE_FUTURES_BASE = "https://fapi.binance.com/fapi/v1"
 SYMBOL = "BTCUSDT"
 INTERVAL = "4h"  # 4小时数据
+DEFAULT_REFRESH_SECONDS = 5
 
 
 # 获取实时价格数据
@@ -240,7 +243,7 @@ def calculate_support_resistance(df, buy_depth=None, sell_depth=None, window=200
 
 
 # 数据整合：获取所有相关数据
-def merge_market_data(btc_df, external_df):
+def merge_market_data(btc_df, external_df, resample_rule="4H"):
     if btc_df.empty:
         return btc_df
     merged = btc_df.copy()
@@ -260,20 +263,21 @@ def merge_market_data(btc_df, external_df):
         }
     )
     external_close.index = pd.to_datetime(external_close.index)
-    external_close = external_close.resample("4H").ffill()
+    external_close = external_close.resample(resample_rule).ffill()
     merged = merged.join(external_close, how="left")
     return merged
 
 
-def collect_data():
-    df_btc = fetch_klines(SYMBOL, INTERVAL)
+def collect_data(interval=INTERVAL):
+    df_btc = fetch_klines(SYMBOL, interval)
     df_ext = fetch_external_data()  # 获取外部经济数据
-    merged = merge_market_data(df_btc, df_ext)
+    resample_rule = "1H" if interval == "1h" else "4H"
+    merged = merge_market_data(df_btc, df_ext, resample_rule=resample_rule)
     return merged, df_ext
 
 
 # 生成最终报告
-def generate_report(
+def build_report(
     df,
     predicted_price,
     price,
@@ -293,18 +297,27 @@ def generate_report(
     def fmt(value):
         return f"{value:.2f}" if pd.notna(value) else "N/A"
 
-    print(f"价格: {fmt(price)}")
-    print(f"预测价格: {fmt(predicted_price)}")
-    print(f"支撑位: {fmt(support)} 阻力位: {fmt(resistance)}")
+    lines = [
+        f"价格: {fmt(price)}",
+        f"预测价格: {fmt(predicted_price)}",
+        f"支撑位: {fmt(support)} 阻力位: {fmt(resistance)}",
+    ]
     if buy_depth and sell_depth:
-        print(f"深度: 买盘{len(buy_depth)} 档 / 卖盘{len(sell_depth)} 档")
-    print(f"RSI: {rsi:.2f}  MACD: {macd_line:.4f}/{signal:.4f}")
-    print(f"布林带: 上轨: {fmt(upper_band)} 下轨: {fmt(lower_band)}")
-    print(f"EMA: 短期: {fmt(short_ema)} 长期: {fmt(long_ema)}")
+        lines.append(f"深度: 买盘{len(buy_depth)} 档 / 卖盘{len(sell_depth)} 档")
+    lines.append(f"RSI: {rsi:.2f}  MACD: {macd_line:.4f}/{signal:.4f}")
+    lines.append(f"布林带: 上轨: {fmt(upper_band)} 下轨: {fmt(lower_band)}")
+    lines.append(f"EMA: 短期: {fmt(short_ema)} 长期: {fmt(long_ema)}")
     trend = "看涨" if predicted_price > price else "看跌"
-    print(f"趋势: {trend}")
+    lines.append(f"趋势: {trend}")
     if trend_info:
-        print(trend_info)
+        lines.append(trend_info)
+    return "\n".join(lines)
+
+
+def generate_report(*args, **kwargs):
+    report = build_report(*args, **kwargs)
+    print(report)
+    return report
 
 
 def analyze_trend(df, timeframe_label):
@@ -364,14 +377,147 @@ def format_level(value):
 
 
 # 可视化价格与预测结果
-def plot_graph(df, predicted_price):
-    plt.figure(figsize=(10, 5))
-    plt.plot(df["close"], label="实际价格")
-    plt.axvline(x=len(df), color="r", linestyle="--", label="预测点")
-    plt.scatter(len(df), predicted_price, color="g", label="预测价格", zorder=5)
-    plt.legend(loc="best")
-    plt.title("BTC价格与预测结果")
-    plt.show()
+def plot_graph(ax, df, predicted_price):
+    ax.clear()
+    ax.plot(df["close"], label="实际价格")
+    ax.axvline(x=len(df), color="r", linestyle="--", label="预测点")
+    ax.scatter(len(df), predicted_price, color="g", label="预测价格", zorder=5)
+    ax.legend(loc="best")
+    ax.set_title("BTC价格与预测结果")
+
+
+def run_gui():
+    root = Tk()
+    root.title("BTC量化交易工具")
+    root.geometry("1100x700")
+
+    interval_var = StringVar(value=INTERVAL)
+    refresh_seconds = StringVar(value=str(DEFAULT_REFRESH_SECONDS))
+
+    control_frame = Frame(root)
+    control_frame.pack(fill=BOTH, padx=8, pady=6)
+
+    Label(control_frame, text="数据周期:").pack(side=LEFT)
+    interval_select = ttk.Combobox(
+        control_frame,
+        textvariable=interval_var,
+        values=["1h", "4h"],
+        width=6,
+        state="readonly",
+    )
+    interval_select.pack(side=LEFT, padx=6)
+
+    Label(control_frame, text="刷新(秒):").pack(side=LEFT)
+    refresh_select = ttk.Combobox(
+        control_frame,
+        textvariable=refresh_seconds,
+        values=["3", "5", "10", "15", "30"],
+        width=6,
+        state="readonly",
+    )
+    refresh_select.pack(side=LEFT, padx=6)
+
+    status_label = Label(control_frame, text="状态: 等待中")
+    status_label.pack(side=RIGHT)
+
+    figure, ax = plt.subplots(figsize=(6, 4))
+    canvas = FigureCanvasTkAgg(figure, master=root)
+    canvas.get_tk_widget().pack(fill=BOTH, expand=True, padx=8, pady=6)
+
+    report_box = Text(root, height=12)
+    report_box.pack(fill=BOTH, padx=8, pady=6)
+
+    running = {"value": True}
+
+    def update_once():
+        if not running["value"]:
+            return
+        interval = interval_var.get()
+        status_label.config(text="状态: 获取数据中")
+        df_btc, df_ext = collect_data(interval=interval)
+        df_futures_1h = fetch_futures_klines(SYMBOL, interval="1h")
+        df_futures_4h = fetch_futures_klines(SYMBOL, interval="4h")
+
+        if df_btc.empty:
+            status_label.config(text="状态: 数据为空")
+        else:
+            price = df_btc["close"].iloc[-1]
+            (
+                rsi,
+                macd_line,
+                signal,
+                upper_band,
+                lower_band,
+                short_ema,
+                long_ema,
+            ) = compute_indicators(df_btc)
+            predicted_price = train_lstm(df_btc)
+            buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
+            support, resistance = calculate_support_resistance(
+                df_btc,
+                buy_depth=buy_depth,
+                sell_depth=sell_depth,
+            )
+            support_1h, resistance_1h = calculate_support_resistance(
+                df_futures_1h,
+                buy_depth=buy_depth,
+                sell_depth=sell_depth,
+            )
+            support_4h, resistance_4h = calculate_support_resistance(
+                df_futures_4h,
+                buy_depth=buy_depth,
+                sell_depth=sell_depth,
+            )
+            trend_1h = analyze_trend(df_futures_1h, "1H")
+            trend_4h = analyze_trend(df_futures_4h, "4H")
+            market_state = describe_market_state(price, support_4h, resistance_4h)
+
+            report = build_report(
+                df_btc,
+                predicted_price,
+                price,
+                rsi,
+                macd_line,
+                signal,
+                upper_band,
+                lower_band,
+                short_ema,
+                long_ema,
+                support,
+                resistance,
+                buy_depth=buy_depth,
+                sell_depth=sell_depth,
+                trend_info=(
+                    f"1H支撑/压力: {format_level(support_1h)}/{format_level(resistance_1h)} | "
+                    f"4H支撑/压力: {format_level(support_4h)}/{format_level(resistance_4h)}\n"
+                    f"{trend_1h}\n{trend_4h}\n"
+                    f"解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。"
+                ),
+            )
+            report_box.delete("1.0", END)
+            report_box.insert(END, report)
+            plot_graph(ax, df_btc, predicted_price)
+            canvas.draw()
+            status_label.config(text=f"状态: 已更新 {datetime.now().strftime('%H:%M:%S')}")
+
+        refresh_ms = int(refresh_seconds.get()) * 1000
+        root.after(refresh_ms, update_once)
+
+    def toggle_running():
+        running["value"] = not running["value"]
+        state_text = "暂停" if running["value"] else "已暂停"
+        status_label.config(text=f"状态: {state_text}")
+        if running["value"]:
+            update_once()
+
+    def manual_refresh():
+        update_once()
+
+    Button(control_frame, text="开始/暂停", command=toggle_running).pack(side=LEFT, padx=8)
+    Button(control_frame, text="手动刷新", command=manual_refresh).pack(side=LEFT, padx=6)
+
+    update_once()
+    root.mainloop()
 
 
 # 主函数
@@ -450,7 +596,10 @@ def monitor():
             )
 
             # 可视化
-            plot_graph(df_btc, predicted_price)
+            plt.figure(figsize=(10, 5))
+            ax = plt.gca()
+            plot_graph(ax, df_btc, predicted_price)
+            plt.show()
 
             # 每5秒更新一次
             time.sleep(5)
@@ -459,5 +608,5 @@ def monitor():
             print("更新失败:", error)
 
 
-# 启动监控
-monitor()
+if __name__ == "__main__":
+    run_gui()
