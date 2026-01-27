@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
-from sklearn.cluster import KMeans
 from sklearn.preprocessing import MinMaxScaler
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
@@ -145,18 +144,38 @@ def train_lstm(df):
 
 
 # 支撑位与阻力位计算
-def calculate_support_resistance(df):
-    highs = df["high"].values
-    lows = df["low"].values
-    data = np.column_stack((lows, highs))
+def _parse_depth_levels(levels, limit=10):
+    parsed = []
+    for price, qty in levels[:limit]:
+        parsed.append((float(price), float(qty)))
+    return parsed
 
-    # 使用 KMeans 聚类算法，进行两类聚类：支撑和阻力
-    kmeans = KMeans(n_clusters=2, random_state=0).fit(data)
 
-    cluster_centers = kmeans.cluster_centers_
+def calculate_support_resistance(df, buy_depth=None, sell_depth=None, window=200):
+    recent = df.tail(window) if len(df) > window else df
+    highs = recent["high"].values
+    lows = recent["low"].values
 
-    support = min(cluster_centers[:, 0])  # 低点簇的中心作为支撑位
-    resistance = max(cluster_centers[:, 1])  # 高点簇的中心作为阻力位
+    # 使用分位数降低极值影响
+    support_quantile = float(np.nanquantile(lows, 0.1))
+    resistance_quantile = float(np.nanquantile(highs, 0.9))
+
+    support = support_quantile
+    resistance = resistance_quantile
+
+    if buy_depth and sell_depth:
+        bids = _parse_depth_levels(buy_depth)
+        asks = _parse_depth_levels(sell_depth)
+
+        if bids:
+            bid_prices, bid_qtys = zip(*bids)
+            weighted_bid = np.average(bid_prices, weights=bid_qtys)
+            support = (support + weighted_bid) / 2
+
+        if asks:
+            ask_prices, ask_qtys = zip(*asks)
+            weighted_ask = np.average(ask_prices, weights=ask_qtys)
+            resistance = (resistance + weighted_ask) / 2
 
     return support, resistance
 
@@ -182,10 +201,14 @@ def generate_report(
     long_ema,
     support,
     resistance,
+    buy_depth=None,
+    sell_depth=None,
 ):
     print(f"价格: {price:.2f}")
     print(f"预测价格: {predicted_price:.2f}")
     print(f"支撑位: {support:.2f} 阻力位: {resistance:.2f}")
+    if buy_depth and sell_depth:
+        print(f"深度: 买盘{len(buy_depth)} 档 / 卖盘{len(sell_depth)} 档")
     print(f"RSI: {rsi:.2f}  MACD: {macd_line:.4f}/{signal:.4f}")
     print(f"布林带: 上轨: {upper_band:.2f} 下轨: {lower_band:.2f}")
     print(f"EMA: 短期: {short_ema:.2f} 长期: {long_ema:.2f}")
@@ -229,8 +252,15 @@ def monitor():
             # LSTM预测
             predicted_price = train_lstm(df_btc)
 
+            # 市场深度
+            buy_depth, sell_depth = get_order_book(SYMBOL)
+
             # 支撑位和阻力位
-            support, resistance = calculate_support_resistance(df_btc)
+            support, resistance = calculate_support_resistance(
+                df_btc,
+                buy_depth=buy_depth,
+                sell_depth=sell_depth,
+            )
 
             # 输出报告
             generate_report(
@@ -246,6 +276,8 @@ def monitor():
                 long_ema,
                 support,
                 resistance,
+                buy_depth=buy_depth,
+                sell_depth=sell_depth,
             )
 
             # 可视化
