@@ -1043,10 +1043,11 @@ def format_level(value):
 # 可视化价格与预测结果
 def plot_graph(ax, df, predicted_price, levels=None, trend_outlook=None, prediction_text=None):
     ax.clear()
+    ax.set_facecolor("#0f1117")
     view = df.tail(PLOT_POINTS)
-    ax.plot(view["close"], label="实际价格")
+    ax.plot(view["close"], label="实际价格", color="#58a6ff", linewidth=1.5)
     ax.axvline(x=len(view), color="r", linestyle="--", label="预测点")
-    ax.scatter(len(view), predicted_price, color="g", label="预测价格", zorder=5)
+    ax.scatter(len(view), predicted_price, color="#2ea043", label="预测价格", zorder=5)
     if levels:
         x_pos = len(view) - 1
         for label, value, color in levels:
@@ -1083,18 +1084,46 @@ def plot_graph(ax, df, predicted_price, levels=None, trend_outlook=None, predict
             bbox=dict(boxstyle="round", facecolor="white", alpha=0.7),
         )
     ax.legend(loc="best")
-    ax.set_title("BTC价格与预测结果")
+    ax.tick_params(axis="x", colors="#8b949e")
+    ax.tick_params(axis="y", colors="#8b949e")
+    for spine in ax.spines.values():
+        spine.set_color("#30363d")
+    ax.set_title("BTC价格与预测结果", color="#e6edf3")
 
 
 def run_gui():
     root = Tk()
     root.title("BTC量化交易工具")
     root.geometry("1100x700")
+    root.configure(bg="#0f1117")
     style = ttk.Style(root)
     try:
         style.theme_use("clam")
     except Exception:
         pass
+    style.configure("TFrame", background="#0f1117")
+    style.configure("TLabel", background="#0f1117", foreground="#e6edf3", font=("Segoe UI", 10))
+    style.configure("TButton", font=("Segoe UI", 10), padding=(8, 4))
+    style.configure("TCombobox", padding=(6, 2))
+    style.configure(
+        "Treeview",
+        background="#0f1117",
+        fieldbackground="#0f1117",
+        foreground="#e6edf3",
+        rowheight=24,
+        font=("Segoe UI", 10),
+    )
+    style.configure(
+        "Treeview.Heading",
+        background="#161b22",
+        foreground="#e6edf3",
+        font=("Segoe UI", 10, "bold"),
+    )
+    style.map(
+        "Treeview",
+        background=[("selected", "#1f6feb")],
+        foreground=[("selected", "#ffffff")],
+    )
 
     interval_var = StringVar(value=INTERVAL)
     refresh_seconds = StringVar(value=str(DEFAULT_REFRESH_SECONDS))
@@ -1130,10 +1159,10 @@ def run_gui():
         rr = parse_float(rr_var.get(), base["rr"])
         return profile, {"risk_pct": risk_pct, "rr": rr}
 
-    control_frame = Frame(root)
-    control_frame.pack(fill=BOTH, padx=8, pady=6)
+    control_frame = ttk.Labelframe(root, text="控制面板", padding=8)
+    control_frame.pack(fill=BOTH, padx=10, pady=8)
 
-    Label(control_frame, text="数据周期:").pack(side=LEFT)
+    Label(control_frame, text="数据周期:").pack(side=LEFT, padx=(4, 2))
     interval_select = ttk.Combobox(
         control_frame,
         textvariable=interval_var,
@@ -1143,7 +1172,7 @@ def run_gui():
     )
     interval_select.pack(side=LEFT, padx=6)
 
-    Label(control_frame, text="刷新(秒):").pack(side=LEFT)
+    Label(control_frame, text="刷新(秒):").pack(side=LEFT, padx=(8, 2))
     refresh_select = ttk.Combobox(
         control_frame,
         textvariable=refresh_seconds,
@@ -1153,7 +1182,7 @@ def run_gui():
     )
     refresh_select.pack(side=LEFT, padx=6)
 
-    Label(control_frame, text="模型:").pack(side=LEFT, padx=6)
+    Label(control_frame, text="模型:").pack(side=LEFT, padx=(8, 2))
     model_select = ttk.Combobox(
         control_frame,
         textvariable=model_var,
@@ -1162,7 +1191,7 @@ def run_gui():
         state="readonly",
     )
     model_select.pack(side=LEFT, padx=6)
-    Label(control_frame, text="支撑/压力版本:").pack(side=LEFT, padx=6)
+    Label(control_frame, text="支撑/压力版本:").pack(side=LEFT, padx=(8, 2))
     sr_select = ttk.Combobox(
         control_frame,
         textvariable=sr_version_var,
@@ -1172,26 +1201,25 @@ def run_gui():
     )
     sr_select.pack(side=LEFT, padx=6)
 
-    Label(control_frame, text="宏观指标:").pack(side=LEFT, padx=6)
+    Label(control_frame, text="宏观指标:").pack(side=LEFT, padx=(8, 2))
     macro_listbox = Listbox(control_frame, selectmode="multiple", height=3, exportselection=False)
     for label, _ in macro_sources:
         macro_listbox.insert(END, label)
     macro_listbox.pack(side=LEFT, padx=6)
     macro_listbox.select_set(0, END)
 
-    Label(control_frame, text="资金流向:").pack(side=LEFT, padx=6)
+    Label(control_frame, text="资金流向:").pack(side=LEFT, padx=(8, 2))
     flow_listbox = Listbox(control_frame, selectmode="multiple", height=3, exportselection=False)
     for label, _ in flow_sources:
         flow_listbox.insert(END, label)
     flow_listbox.pack(side=LEFT, padx=6)
     flow_listbox.select_set(0, END)
 
-    status_label = Label(control_frame, text="状态: 手动刷新")
+    status_label = Label(control_frame, text="状态: 手动刷新", font=("Segoe UI", 10, "bold"))
     status_label.pack(side=RIGHT)
 
-    strategy_config_frame = Frame(root)
-    strategy_config_frame.pack(fill=BOTH, padx=8, pady=4)
-    Label(strategy_config_frame, text="策略定制").pack(side=LEFT, padx=6)
+    strategy_config_frame = ttk.Labelframe(root, text="策略定制", padding=8)
+    strategy_config_frame.pack(fill=BOTH, padx=10, pady=6)
     Label(strategy_config_frame, text="风险偏好:").pack(side=LEFT, padx=4)
     risk_profile_select = ttk.Combobox(
         strategy_config_frame,
@@ -1209,13 +1237,12 @@ def run_gui():
     rr_entry = Entry(strategy_config_frame, textvariable=rr_var, width=8)
     rr_entry.pack(side=LEFT, padx=4)
 
-    figure, ax = plt.subplots(figsize=(6, 4))
+    figure, ax = plt.subplots(figsize=(6, 4), facecolor="#0f1117")
     canvas = FigureCanvasTkAgg(figure, master=root)
     canvas.get_tk_widget().pack(fill=BOTH, expand=True, padx=8, pady=6)
 
-    metrics_frame = Frame(root)
-    metrics_frame.pack(fill=BOTH, padx=8, pady=6)
-    Label(metrics_frame, text="关键指标").pack(side=LEFT, padx=6)
+    metrics_frame = ttk.Labelframe(root, text="关键指标", padding=8)
+    metrics_frame.pack(fill=BOTH, padx=10, pady=6)
     metrics_table = ttk.Treeview(
         metrics_frame,
         columns=("label", "value"),
@@ -1243,9 +1270,8 @@ def run_gui():
     for row_id, label in metrics_rows:
         metrics_table.insert("", "end", iid=row_id, values=(label, "—"))
 
-    report_frame = Frame(root)
-    report_frame.pack(fill=BOTH, padx=8, pady=6)
-    Label(report_frame, text="分类输出").pack(side=LEFT, padx=6)
+    report_frame = ttk.Labelframe(root, text="分类输出", padding=8)
+    report_frame.pack(fill=BOTH, padx=10, pady=6)
     report_table = ttk.Treeview(
         report_frame,
         columns=("category", "content"),
@@ -1266,9 +1292,8 @@ def run_gui():
     for row_id, label in report_rows:
         report_table.insert("", "end", iid=row_id, values=(label, "—"))
 
-    strategy_frame = Frame(root)
-    strategy_frame.pack(fill=BOTH, padx=8, pady=6)
-    Label(strategy_frame, text="策略表").pack(side=LEFT, padx=6)
+    strategy_frame = ttk.Labelframe(root, text="策略表", padding=8)
+    strategy_frame.pack(fill=BOTH, padx=10, pady=6)
     strategy_table = ttk.Treeview(
         strategy_frame,
         columns=("side", "entry", "stop", "take", "amount"),
@@ -1289,9 +1314,8 @@ def run_gui():
     for row_id, label in [("long", "做多"), ("short", "做空")]:
         strategy_table.insert("", "end", iid=row_id, values=(label, "—", "—", "—", "—"))
 
-    account_frame = Frame(root)
-    account_frame.pack(fill=BOTH, padx=8, pady=6)
-    Label(account_frame, text="币安模拟仓").pack(side=LEFT, padx=6)
+    account_frame = ttk.Labelframe(root, text="币安模拟仓", padding=8)
+    account_frame.pack(fill=BOTH, padx=10, pady=6)
     balance_var = StringVar(value="余额: 10000.00 USDT")
     position_var = StringVar(value="持仓: 0.00 BTC")
     entry_var = StringVar(value="入场价: N/A")
@@ -1303,7 +1327,7 @@ def run_gui():
     Label(account_frame, textvariable=pnl_var).pack(side=LEFT, padx=6)
     Label(account_frame, textvariable=side_var).pack(side=LEFT, padx=6)
     amount_var = StringVar(value="1000")
-    Label(account_frame, text="下单金额(USDT):").pack(side=LEFT, padx=6)
+    Label(account_frame, text="下单金额(USDT):").pack(side=LEFT, padx=8)
     amount_entry = Entry(account_frame, textvariable=amount_var, width=8)
     amount_entry.pack(side=LEFT, padx=4)
 
