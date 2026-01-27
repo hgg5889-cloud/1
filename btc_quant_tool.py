@@ -233,6 +233,10 @@ def compute_prediction_metrics(
     signal,
     short_ema,
     long_ema,
+    upper_band=None,
+    lower_band=None,
+    support=None,
+    resistance=None,
     depth_signal=None,
     macro_bias=0.0,
 ):
@@ -260,13 +264,44 @@ def compute_prediction_metrics(
     else:
         volume_bias = 0.0
 
+    band_bias = 0.0
+    if upper_band is not None and lower_band is not None and pd.notna(upper_band) and pd.notna(lower_band):
+        band_width = upper_band - lower_band
+        if band_width > 0:
+            band_bias = ((price - lower_band) / band_width - 0.5) * 2
+
+    range_bias = 0.0
+    if support is not None and resistance is not None and pd.notna(support) and pd.notna(resistance):
+        range_width = resistance - support
+        if range_width > 0:
+            range_bias = ((price - support) / range_width - 0.5) * 2
+
+    external_bias = 0.0
+    for column in ("sp500_close", "dxy_close", "gold_close", "vix_close", "us10y_close"):
+        if column in df.columns and len(df[column].dropna()) >= 2:
+            series = df[column].dropna()
+            pct = (series.iloc[-1] / series.iloc[-2] - 1) * 100
+            if column == "sp500_close":
+                external_bias += pct * 0.03
+            elif column == "dxy_close":
+                external_bias -= pct * 0.03
+            elif column == "gold_close":
+                external_bias += pct * 0.01
+            elif column == "vix_close":
+                external_bias -= pct * 0.02
+            elif column == "us10y_close":
+                external_bias -= pct * 0.01
+
     composite = (
         0.35 * depth_bias
         + 0.2 * ema_trend
         + 0.15 * macd_trend
         + 0.1 * rsi_bias
         + 0.1 * price_bias
-        + 0.1 * volume_bias
+        + 0.05 * volume_bias
+        + 0.05 * band_bias
+        + 0.05 * range_bias
+        + 0.05 * external_bias
         + 0.1 * macro_bias
     )
     composite = float(np.clip(composite, -0.04, 0.04))
@@ -1088,22 +1123,6 @@ def run_gui():
             buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
             depth_signal = compute_order_book_signal(buy_depth, sell_depth, mid_price=price)
             macro_bias = compute_macro_bias(df_ext)
-            (
-                predicted_price,
-                trend_outlook,
-                prediction_text,
-            ) = compute_prediction_metrics(
-                df_btc,
-                price,
-                predicted_price_raw,
-                rsi,
-                macd_line,
-                signal,
-                short_ema,
-                long_ema,
-                depth_signal=depth_signal,
-                macro_bias=macro_bias,
-            )
             support, resistance = calculate_support_resistance(
                 df_btc,
                 buy_depth=buy_depth,
@@ -1118,6 +1137,26 @@ def run_gui():
                 df_futures_4h,
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
+            )
+            (
+                predicted_price,
+                trend_outlook,
+                prediction_text,
+            ) = compute_prediction_metrics(
+                df_btc,
+                price,
+                predicted_price_raw,
+                rsi,
+                macd_line,
+                signal,
+                short_ema,
+                long_ema,
+                upper_band=upper_band,
+                lower_band=lower_band,
+                support=support,
+                resistance=resistance,
+                depth_signal=depth_signal,
+                macro_bias=macro_bias,
             )
             trend_1h = analyze_trend(df_futures_1h, "1H")
             trend_4h = analyze_trend(df_futures_4h, "4H")
@@ -1369,18 +1408,6 @@ def monitor():
             buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
             depth_signal = compute_order_book_signal(buy_depth, sell_depth, mid_price=price)
             macro_bias = compute_macro_bias(df_ext)
-            predicted_price, trend_outlook, prediction_text = compute_prediction_metrics(
-                df_btc,
-                price,
-                predicted_price_raw,
-                rsi,
-                macd_line,
-                signal,
-                short_ema,
-                long_ema,
-                depth_signal=depth_signal,
-                macro_bias=macro_bias,
-            )
 
             # 支撑位和阻力位
             support, resistance = calculate_support_resistance(
@@ -1397,6 +1424,22 @@ def monitor():
                 df_futures_4h,
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
+            )
+            predicted_price, trend_outlook, prediction_text = compute_prediction_metrics(
+                df_btc,
+                price,
+                predicted_price_raw,
+                rsi,
+                macd_line,
+                signal,
+                short_ema,
+                long_ema,
+                upper_band=upper_band,
+                lower_band=lower_band,
+                support=support,
+                resistance=resistance,
+                depth_signal=depth_signal,
+                macro_bias=macro_bias,
             )
             trend_1h = analyze_trend(df_futures_1h, "1H")
             trend_4h = analyze_trend(df_futures_4h, "4H")
