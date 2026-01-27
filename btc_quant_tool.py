@@ -55,6 +55,8 @@ SUPPORTED_INTERVALS = [
 ]
 MODEL_OPTIONS = ["LSTM", "GRU"]
 FLOW_INTERVAL_OPTIONS = ["15m", "30m", "1h", "2h", "4h", "1d"]
+SR_VERSION_OPTIONS = ["版本1", "版本2", "版本3", "版本4"]
+DEFAULT_SR_VERSION = "版本2"
 STRATEGY_RISK_CONFIG = {
     "aggressive": {"risk_pct": 0.02, "rr": 2.0},
     "balanced": {"risk_pct": 0.01, "rr": 1.8},
@@ -581,7 +583,18 @@ def _parse_depth_levels(levels, limit=200):
     return parsed
 
 
-def calculate_support_resistance(df, buy_depth=None, sell_depth=None, window=200):
+def _calculate_sr_version1(df, window=200):
+    recent = df.tail(window) if len(df) > window else df
+    highs = recent["high"].dropna().values
+    lows = recent["low"].dropna().values
+    if highs.size == 0 or lows.size == 0:
+        return float("nan"), float("nan")
+    support = float(np.nanquantile(lows, 0.2))
+    resistance = float(np.nanquantile(highs, 0.8))
+    return support, resistance
+
+
+def _calculate_sr_version2(df, buy_depth=None, sell_depth=None, window=200):
     recent = df.tail(window) if len(df) > window else df
     highs = recent["high"].dropna().values
     lows = recent["low"].dropna().values
@@ -590,7 +603,6 @@ def calculate_support_resistance(df, buy_depth=None, sell_depth=None, window=200
     if highs.size == 0 or lows.size == 0:
         return float("nan"), float("nan")
 
-    # 使用分位数 + 最近价格位置，动态选择支撑/阻力
     support_candidates = [float(np.nanquantile(lows, q)) for q in (0.1, 0.2, 0.3, 0.4)]
     resistance_candidates = [float(np.nanquantile(highs, q)) for q in (0.6, 0.7, 0.8, 0.9)]
 
@@ -613,13 +625,48 @@ def calculate_support_resistance(df, buy_depth=None, sell_depth=None, window=200
             weighted_ask = np.average(ask_prices, weights=ask_qtys)
             resistance_candidates.append(weighted_ask)
 
-    # 结合深度加权后的候选重新选择
     support_below = [level for level in support_candidates if level <= price]
     resistance_above = [level for level in resistance_candidates if level >= price]
     support = max(support_below) if support_below else min(support_candidates)
     resistance = min(resistance_above) if resistance_above else max(resistance_candidates)
 
     return support, resistance
+
+
+def _calculate_sr_version3(df, window=200):
+    recent = df.tail(window) if len(df) > window else df
+    highs = recent["high"].dropna()
+    lows = recent["low"].dropna()
+    if highs.empty or lows.empty:
+        return float("nan"), float("nan")
+    atr = compute_atr(recent)
+    if atr is None:
+        atr = (highs.max() - lows.min()) / max(len(recent), 1)
+    high_level = highs.max()
+    low_level = lows.min()
+    return float(low_level + atr * 0.5), float(high_level - atr * 0.5)
+
+
+def _calculate_sr_version4(df, window=200):
+    recent = df.tail(window) if len(df) > window else df
+    close = recent["close"].dropna()
+    if close.empty or len(close) < 20:
+        return float("nan"), float("nan")
+    ma = close.rolling(window=20).mean().iloc[-1]
+    std = close.rolling(window=20).std().iloc[-1]
+    if pd.isna(ma) or pd.isna(std):
+        return float("nan"), float("nan")
+    return float(ma - 2 * std), float(ma + 2 * std)
+
+
+def calculate_support_resistance(df, buy_depth=None, sell_depth=None, window=200, version="版本2"):
+    if version == "版本1":
+        return _calculate_sr_version1(df, window=window)
+    if version == "版本3":
+        return _calculate_sr_version3(df, window=window)
+    if version == "版本4":
+        return _calculate_sr_version4(df, window=window)
+    return _calculate_sr_version2(df, buy_depth=buy_depth, sell_depth=sell_depth, window=window)
 
 
 # 数据整合：获取所有相关数据
@@ -1052,6 +1099,7 @@ def run_gui():
     interval_var = StringVar(value=INTERVAL)
     refresh_seconds = StringVar(value=str(DEFAULT_REFRESH_SECONDS))
     model_var = StringVar(value=MODEL_OPTIONS[0])
+    sr_version_var = StringVar(value=DEFAULT_SR_VERSION)
     risk_profile_var = StringVar(value="balanced")
     risk_pct_var = StringVar(value=str(STRATEGY_RISK_CONFIG["balanced"]["risk_pct"]))
     rr_var = StringVar(value=str(STRATEGY_RISK_CONFIG["balanced"]["rr"]))
@@ -1114,6 +1162,15 @@ def run_gui():
         state="readonly",
     )
     model_select.pack(side=LEFT, padx=6)
+    Label(control_frame, text="支撑/压力版本:").pack(side=LEFT, padx=6)
+    sr_select = ttk.Combobox(
+        control_frame,
+        textvariable=sr_version_var,
+        values=SR_VERSION_OPTIONS,
+        width=6,
+        state="readonly",
+    )
+    sr_select.pack(side=LEFT, padx=6)
 
     Label(control_frame, text="宏观指标:").pack(side=LEFT, padx=6)
     macro_listbox = Listbox(control_frame, selectmode="multiple", height=3, exportselection=False)
@@ -1264,6 +1321,7 @@ def run_gui():
         if not running["value"] and not force:
             return
         interval = interval_var.get()
+        sr_version = sr_version_var.get()
         status_label.config(text="状态: 获取数据中")
         df_btc, df_ext = collect_data(interval=interval)
         df_futures_1h = fetch_futures_klines(SYMBOL, interval="1h")
@@ -1295,16 +1353,19 @@ def run_gui():
                 df_btc,
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
+                version=sr_version,
             )
             support_1h, resistance_1h = calculate_support_resistance(
                 df_futures_1h,
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
+                version=sr_version,
             )
             support_4h, resistance_4h = calculate_support_resistance(
                 df_futures_4h,
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
+                version=sr_version,
             )
             (
                 predicted_price,
@@ -1388,6 +1449,7 @@ def run_gui():
                 "content",
                 (
                     f"{price_change_info} | 预测价: {predicted_price:.2f} | "
+                    f"SR版本: {sr_version} | "
                     f"{prediction_text} | 趋势: {trend_outlook} | 深度: {len(buy_depth)}/{len(sell_depth)}"
                 ),
             )
@@ -1415,20 +1477,20 @@ def run_gui():
             metrics_table.set("prediction_move", "value", prediction_text)
             metrics_table.set("trend", "value", trend_outlook)
             metrics_table.set("delta", "value", f"{delta:+.2f} ({delta_pct:+.2f}%)")
-            metrics_table.set("support", "value", format_level(support))
-            metrics_table.set("resistance", "value", format_level(resistance))
-            metrics_table.set("support_1h", "value", format_level(support_1h))
-            metrics_table.set("resistance_1h", "value", format_level(resistance_1h))
-            metrics_table.set("support_4h", "value", format_level(support_4h))
-            metrics_table.set("resistance_4h", "value", format_level(resistance_4h))
+            metrics_table.set("support", "value", f"{format_level(support)} ({sr_version})")
+            metrics_table.set("resistance", "value", f"{format_level(resistance)} ({sr_version})")
+            metrics_table.set("support_1h", "value", f"{format_level(support_1h)} ({sr_version})")
+            metrics_table.set("resistance_1h", "value", f"{format_level(resistance_1h)} ({sr_version})")
+            metrics_table.set("support_4h", "value", f"{format_level(support_4h)} ({sr_version})")
+            metrics_table.set("resistance_4h", "value", f"{format_level(resistance_4h)} ({sr_version})")
 
             levels = [
-                (f"{interval.upper()}支撑", support, "tab:green"),
-                (f"{interval.upper()}压力", resistance, "tab:red"),
-                ("1H支撑", support_1h, "tab:blue"),
-                ("1H压力", resistance_1h, "tab:purple"),
-                ("4H支撑", support_4h, "tab:olive"),
-                ("4H压力", resistance_4h, "tab:brown"),
+                (f"{interval.upper()}支撑({sr_version})", support, "tab:green"),
+                (f"{interval.upper()}压力({sr_version})", resistance, "tab:red"),
+                (f"1H支撑({sr_version})", support_1h, "tab:blue"),
+                (f"1H压力({sr_version})", resistance_1h, "tab:purple"),
+                (f"4H支撑({sr_version})", support_4h, "tab:olive"),
+                (f"4H压力({sr_version})", resistance_4h, "tab:brown"),
             ]
             plot_graph(
                 ax,
@@ -1584,21 +1646,25 @@ def monitor():
             depth_signal = compute_order_book_signal(buy_depth, sell_depth, mid_price=price)
             macro_bias = compute_macro_bias(df_ext)
 
+            sr_version = DEFAULT_SR_VERSION
             # 支撑位和阻力位
             support, resistance = calculate_support_resistance(
                 df_btc,
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
+                version=sr_version,
             )
             support_1h, resistance_1h = calculate_support_resistance(
                 df_futures_1h,
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
+                version=sr_version,
             )
             support_4h, resistance_4h = calculate_support_resistance(
                 df_futures_4h,
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
+                version=sr_version,
             )
             predicted_price, trend_outlook, prediction_text = compute_prediction_metrics(
                 df_btc,
@@ -1642,8 +1708,8 @@ def monitor():
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
                 trend_info=(
-                    f"1H支撑/压力: {format_level(support_1h)}/{format_level(resistance_1h)} | "
-                    f"4H支撑/压力: {format_level(support_4h)}/{format_level(resistance_4h)}\n"
+                    f"1H支撑/压力({sr_version}): {format_level(support_1h)}/{format_level(resistance_1h)} | "
+                    f"4H支撑/压力({sr_version}): {format_level(support_4h)}/{format_level(resistance_4h)}\n"
                     f"{trend_1h}\n{trend_4h}\n"
                     f"{flow_main}\n{flow_1h}\n{flow_4h}\n{flow_interval_summary}\n"
                     f"解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。\n"
