@@ -51,6 +51,7 @@ SUPPORTED_INTERVALS = [
     "1d",
 ]
 MODEL_OPTIONS = ["LSTM", "GRU"]
+FLOW_INTERVAL_OPTIONS = ["15m", "30m", "1h", "2h", "4h", "1d"]
 
 
 # 获取实时价格数据
@@ -433,6 +434,15 @@ def summarize_flows(df, timeframe_label):
     )
 
 
+def summarize_flow_intervals(intervals):
+    summaries = []
+    for interval in intervals:
+        df_interval = fetch_futures_klines(SYMBOL, interval=interval)
+        label = interval.upper()
+        summaries.append(summarize_flows(df_interval, label))
+    return "\n".join(summaries)
+
+
 def build_macro_summary(external_df, selected_tickers=None):
     if external_df.empty:
         return "宏观指标: 数据不足 (ai自动选择源)"
@@ -484,6 +494,14 @@ def build_macro_summary(external_df, selected_tickers=None):
         "宏观指标: "
         f"{' | '.join(selected_lines)}\n"
         f"宏观信号: {macro_signal} | {policy_note}"
+    )
+
+
+def build_depth_insights():
+    return (
+        "衍生品/资金指标: "
+        "杠杆借贷存量增速 N/A | 杠杆多空比 N/A | 大单净流入(BTC) N/A | "
+        "主力净流入 N/A | 持仓集中度 N/A | 逐仓借贷比 N/A | 24h资金净流入 N/A"
     )
 
 
@@ -546,6 +564,7 @@ def run_gui():
         ("VIX", "^VIX"),
         ("美债10Y", "^TNX"),
     ]
+    flow_sources = [(label, label) for label in FLOW_INTERVAL_OPTIONS]
 
     control_frame = Frame(root)
     control_frame.pack(fill=BOTH, padx=8, pady=6)
@@ -585,6 +604,12 @@ def run_gui():
     for label, _ in macro_sources:
         macro_listbox.insert(END, label)
     macro_listbox.pack(side=LEFT, padx=6)
+
+    Label(control_frame, text="资金流向:").pack(side=LEFT, padx=6)
+    flow_listbox = Listbox(control_frame, selectmode="multiple", height=3, exportselection=False)
+    for label, _ in flow_sources:
+        flow_listbox.insert(END, label)
+    flow_listbox.pack(side=LEFT, padx=6)
 
     status_label = Label(control_frame, text="状态: 等待中")
     status_label.pack(side=RIGHT)
@@ -660,6 +685,13 @@ def run_gui():
             flow_main = summarize_flows(df_btc, interval.upper())
             flow_1h = summarize_flows(df_futures_1h, "1H")
             flow_4h = summarize_flows(df_futures_4h, "4H")
+            selected_flow_indices = flow_listbox.curselection()
+            selected_flow_intervals = []
+            if selected_flow_indices:
+                selected_flow_intervals = [flow_sources[i][1] for i in selected_flow_indices]
+            flow_interval_summary = (
+                summarize_flow_intervals(selected_flow_intervals) if selected_flow_intervals else None
+            )
             market_state = describe_market_state(price, support_4h, resistance_4h)
             selected_indices = macro_listbox.curselection()
             selected_tickers = None
@@ -686,8 +718,10 @@ def run_gui():
                     f"1H支撑/压力: {format_level(support_1h)}/{format_level(resistance_1h)} | "
                     f"4H支撑/压力: {format_level(support_4h)}/{format_level(resistance_4h)}\n"
                     f"{trend_1h}\n{trend_4h}\n"
-                    f"{flow_main}\n{flow_1h}\n{flow_4h}\n"
-                    f"解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。"
+                    f"{flow_main}\n{flow_1h}\n{flow_4h}"
+                    + (f"\n{flow_interval_summary}" if flow_interval_summary else "")
+                    + f"\n解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。"
+                    + f"\n{build_depth_insights()}"
                 ),
                 macro_info=macro_info,
             )
@@ -823,6 +857,7 @@ def monitor():
             flow_main = summarize_flows(df_btc, INTERVAL.upper())
             flow_1h = summarize_flows(df_futures_1h, "1H")
             flow_4h = summarize_flows(df_futures_4h, "4H")
+            flow_interval_summary = summarize_flow_intervals(FLOW_INTERVAL_OPTIONS)
             market_state = describe_market_state(price, support_4h, resistance_4h)
             macro_info = build_macro_summary(df_ext)
 
@@ -846,8 +881,9 @@ def monitor():
                     f"1H支撑/压力: {format_level(support_1h)}/{format_level(resistance_1h)} | "
                     f"4H支撑/压力: {format_level(support_4h)}/{format_level(resistance_4h)}\n"
                     f"{trend_1h}\n{trend_4h}\n"
-                    f"{flow_main}\n{flow_1h}\n{flow_4h}\n"
-                    f"解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。"
+                    f"{flow_main}\n{flow_1h}\n{flow_4h}\n{flow_interval_summary}\n"
+                    f"解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。\n"
+                    f"{build_depth_insights()}"
                 ),
                 macro_info=macro_info,
             )
