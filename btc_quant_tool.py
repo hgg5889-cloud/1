@@ -53,6 +53,11 @@ SUPPORTED_INTERVALS = [
 ]
 MODEL_OPTIONS = ["LSTM", "GRU"]
 FLOW_INTERVAL_OPTIONS = ["15m", "30m", "1h", "2h", "4h", "1d"]
+STRATEGY_RISK_CONFIG = {
+    "aggressive": {"risk_pct": 0.02, "rr": 2.0},
+    "balanced": {"risk_pct": 0.01, "rr": 1.8},
+    "conservative": {"risk_pct": 0.005, "rr": 1.5},
+}
 
 
 # 获取实时价格数据
@@ -350,6 +355,7 @@ def build_report(
     trend_info=None,
     macro_info=None,
     price_change_info=None,
+    strategy_info=None,
 ):
     def fmt(value):
         return f"{value:.2f}" if pd.notna(value) else "N/A"
@@ -372,6 +378,8 @@ def build_report(
         lines.append(trend_info)
     if macro_info:
         lines.append(macro_info)
+    if strategy_info:
+        lines.append(strategy_info)
     return "\n".join(lines)
 
 
@@ -506,6 +514,79 @@ def build_depth_insights():
         "衍生品/资金指标: "
         "杠杆借贷存量增速 N/A | 杠杆多空比 N/A | 大单净流入(BTC) N/A | "
         "主力净流入 N/A | 持仓集中度 N/A | 逐仓借贷比 N/A | 24h资金净流入 N/A"
+    )
+
+
+class TradeStrategy:
+    def __init__(self, risk_profile="balanced"):
+        self.risk_profile = risk_profile
+        self.config = STRATEGY_RISK_CONFIG.get(risk_profile, STRATEGY_RISK_CONFIG["balanced"])
+
+    def _position_size(self, account_balance, entry, stop):
+        risk_amount = account_balance * self.config["risk_pct"]
+        risk_per_unit = max(abs(entry - stop), 1e-6)
+        return max(risk_amount / risk_per_unit, 0)
+
+    def short_term_strategy(self, price, support, resistance, rsi, macd_line, signal):
+        entry_long = support * 1.01
+        entry_short = resistance * 0.99
+        stop_long = support * 0.98
+        stop_short = resistance * 1.02
+        take_long = entry_long + (entry_long - stop_long) * self.config["rr"]
+        take_short = entry_short - (stop_short - entry_short) * self.config["rr"]
+        long_ok = price <= entry_long and rsi < 45 and macd_line > signal
+        short_ok = price >= entry_short and rsi > 55 and macd_line < signal
+        return (
+            "短线策略:\n"
+            f"多单条件: 价格<= {entry_long:.2f} & RSI<45 & MACD金叉\n"
+            f"空单条件: 价格>= {entry_short:.2f} & RSI>55 & MACD死叉\n"
+            f"止损/止盈: 多 {stop_long:.2f}/{take_long:.2f} | 空 {stop_short:.2f}/{take_short:.2f}\n"
+            f"信号: {'多单可尝试' if long_ok else '空单可尝试' if short_ok else '观望'}"
+        )
+
+    def range_strategy(self, price, support, resistance):
+        buy_zone = support * 1.01
+        sell_zone = resistance * 0.99
+        stop_break = support * 0.98
+        stop_fail = resistance * 1.02
+        in_range = support < price < resistance
+        return (
+            "区间震荡策略:\n"
+            f"低吸区: {buy_zone:.2f} 附近，止损 {stop_break:.2f}\n"
+            f"高抛区: {sell_zone:.2f} 附近，止损 {stop_fail:.2f}\n"
+            f"破位应急: 跌破支撑减仓/止损；突破压力追随并设移动止损\n"
+            f"状态: {'区间内执行' if in_range else '区间外等待确认'}"
+        )
+
+    def conservative_strategy(self, price, support, resistance, short_ema, long_ema):
+        trend = "上行" if short_ema > long_ema else "下行"
+        entry = resistance * 1.005 if trend == "上行" else support * 0.995
+        stop = support * 0.985 if trend == "上行" else resistance * 1.015
+        take = entry + (entry - stop) * self.config["rr"] if trend == "上行" else entry - (stop - entry) * self.config["rr"]
+        return (
+            "稳健合约策略:\n"
+            f"趋势: {trend} | 建仓价 {entry:.2f}\n"
+            f"止损/止盈: {stop:.2f}/{take:.2f}\n"
+            "加仓/减仓: 价格站稳均线分批加仓，跌破均线分批减仓"
+        )
+
+    def spike_response(self, price, support, resistance):
+        if price > resistance * 1.02:
+            return "极端波动应对: 大涨，分批止盈或上移止损，必要时锁仓保护利润"
+        if price < support * 0.98:
+            return "极端波动应对: 大跌，快速止损或对冲锁仓，等待企稳再评估"
+        return "极端波动应对: 价格正常，维持原策略或减小仓位"
+
+
+def build_strategy_report(price, support, resistance, rsi, macd_line, signal, short_ema, long_ema):
+    strategy = TradeStrategy()
+    return "\n".join(
+        [
+            strategy.short_term_strategy(price, support, resistance, rsi, macd_line, signal),
+            strategy.range_strategy(price, support, resistance),
+            strategy.conservative_strategy(price, support, resistance, short_ema, long_ema),
+            strategy.spike_response(price, support, resistance),
+        ]
     )
 
 
@@ -740,6 +821,16 @@ def run_gui():
                 ),
                 macro_info=macro_info,
                 price_change_info=price_change_info,
+                strategy_info=build_strategy_report(
+                    price,
+                    support,
+                    resistance,
+                    rsi,
+                    macd_line,
+                    signal,
+                    short_ema,
+                    long_ema,
+                ),
             )
             report_box.delete("1.0", END)
             report_box.insert(END, report)
@@ -903,6 +994,16 @@ def monitor():
                 ),
                 macro_info=macro_info,
                 price_change_info=price_change_info,
+                strategy_info=build_strategy_report(
+                    price,
+                    support,
+                    resistance,
+                    rsi,
+                    macd_line,
+                    signal,
+                    short_ema,
+                    long_ema,
+                ),
             )
 
             # 可视化
