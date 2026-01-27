@@ -309,6 +309,12 @@ def compute_prediction_metrics(
         if range_width > 0:
             range_bias = ((price - support) / range_width - 0.5) * 2
 
+    momentum_bias = 0.0
+    if len(df) >= 11:
+        roc5 = (df["close"].iloc[-1] / df["close"].iloc[-6] - 1) if df["close"].iloc[-6] else 0.0
+        roc10 = (df["close"].iloc[-1] / df["close"].iloc[-11] - 1) if df["close"].iloc[-11] else 0.0
+        momentum_bias = (roc5 + roc10) / 2
+
     external_bias = 0.0
     for column in ("sp500_close", "dxy_close", "gold_close", "vix_close", "us10y_close"):
         if column in df.columns and len(df[column].dropna()) >= 2:
@@ -335,10 +341,16 @@ def compute_prediction_metrics(
         + 0.05 * flow_bias
         + 0.05 * band_bias
         + 0.05 * range_bias
+        + 0.05 * momentum_bias
         + 0.05 * external_bias
         + 0.1 * macro_bias
     )
-    composite = float(np.clip(composite, -0.04, 0.04))
+    volatility = df["close"].pct_change().tail(20).std() if len(df) >= 20 else 0.0
+    vol_scale = 1 - min(0.5, volatility * 8) if volatility else 1.0
+    vol_scale = float(np.clip(vol_scale, 0.3, 1.0))
+    composite *= vol_scale
+    cap = 0.04 + min(0.03, volatility * 5) if volatility else 0.04
+    composite = float(np.clip(composite, -cap, cap))
     predicted_price = base_prediction * (1 + composite)
 
     delta = predicted_price - price
@@ -397,6 +409,26 @@ def compute_indicators(df):
     short_ema = EMAIndicator(df["close"], window=50).ema_indicator().iloc[-1]
     long_ema = EMAIndicator(df["close"], window=200).ema_indicator().iloc[-1]
     return rsi, macd_line, signal, upper_band, lower_band, short_ema, long_ema
+
+
+def compute_atr(df, window=14):
+    if df.empty or len(df) < window + 1:
+        return None
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    prev_close = close.shift(1)
+    true_range = pd.concat(
+        [
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = true_range.rolling(window=window).mean()
+    latest_atr = atr.iloc[-1]
+    return float(latest_atr) if pd.notna(latest_atr) else None
 
 
 # 数据标准化
@@ -768,11 +800,15 @@ class TradeStrategy:
         risk_per_unit = max(abs(entry - stop), 1e-6)
         return max(risk_amount / risk_per_unit, 0)
 
-    def short_term_strategy(self, price, support, resistance, rsi, macd_line, signal):
+    def short_term_strategy(self, price, support, resistance, rsi, macd_line, signal, atr=None):
         entry_long = support * 1.01
         entry_short = resistance * 0.99
-        stop_long = support * 0.98
-        stop_short = resistance * 1.02
+        if atr:
+            stop_long = entry_long - atr * 1.2
+            stop_short = entry_short + atr * 1.2
+        else:
+            stop_long = support * 0.98
+            stop_short = resistance * 1.02
         take_long = entry_long + (entry_long - stop_long) * self.config["rr"]
         take_short = entry_short - (stop_short - entry_short) * self.config["rr"]
         long_ok = price <= entry_long and rsi < 45 and macd_line > signal
@@ -785,11 +821,15 @@ class TradeStrategy:
             f"信号: {'多单可尝试' if long_ok else '空单可尝试' if short_ok else '观望'}"
         )
 
-    def range_strategy(self, price, support, resistance):
+    def range_strategy(self, price, support, resistance, atr=None):
         buy_zone = support * 1.01
         sell_zone = resistance * 0.99
-        stop_break = support * 0.98
-        stop_fail = resistance * 1.02
+        if atr:
+            stop_break = buy_zone - atr * 1.1
+            stop_fail = sell_zone + atr * 1.1
+        else:
+            stop_break = support * 0.98
+            stop_fail = resistance * 1.02
         in_range = support < price < resistance
         return (
             "区间震荡策略:\n"
@@ -799,10 +839,13 @@ class TradeStrategy:
             f"状态: {'区间内执行' if in_range else '区间外等待确认'}"
         )
 
-    def conservative_strategy(self, price, support, resistance, short_ema, long_ema):
+    def conservative_strategy(self, price, support, resistance, short_ema, long_ema, atr=None):
         trend = "上行" if short_ema > long_ema else "下行"
         entry = resistance * 1.005 if trend == "上行" else support * 0.995
-        stop = support * 0.985 if trend == "上行" else resistance * 1.015
+        if atr:
+            stop = entry - atr * 1.5 if trend == "上行" else entry + atr * 1.5
+        else:
+            stop = support * 0.985 if trend == "上行" else resistance * 1.015
         take = entry + (entry - stop) * self.config["rr"] if trend == "上行" else entry - (stop - entry) * self.config["rr"]
         return (
             "稳健合约策略:\n"
@@ -811,10 +854,12 @@ class TradeStrategy:
             "加仓/减仓: 价格站稳均线分批加仓，跌破均线分批减仓"
         )
 
-    def spike_response(self, price, support, resistance):
-        if price > resistance * 1.02:
+    def spike_response(self, price, support, resistance, atr=None):
+        spike_up = resistance * 1.02 if not atr else resistance + atr * 1.5
+        spike_down = support * 0.98 if not atr else support - atr * 1.5
+        if price > spike_up:
             return "极端波动应对: 大涨，分批止盈或上移止损，必要时锁仓保护利润"
-        if price < support * 0.98:
+        if price < spike_down:
             return "极端波动应对: 大跌，快速止损或对冲锁仓，等待企稳再评估"
         return "极端波动应对: 价格正常，维持原策略或减小仓位"
 
@@ -828,15 +873,16 @@ def build_strategy_report(
     signal,
     short_ema,
     long_ema,
+    atr=None,
     strategy=None,
 ):
     strategy = strategy or TradeStrategy()
     return "\n".join(
         [
-            strategy.short_term_strategy(price, support, resistance, rsi, macd_line, signal),
-            strategy.range_strategy(price, support, resistance),
-            strategy.conservative_strategy(price, support, resistance, short_ema, long_ema),
-            strategy.spike_response(price, support, resistance),
+            strategy.short_term_strategy(price, support, resistance, rsi, macd_line, signal, atr=atr),
+            strategy.range_strategy(price, support, resistance, atr=atr),
+            strategy.conservative_strategy(price, support, resistance, short_ema, long_ema, atr=atr),
+            strategy.spike_response(price, support, resistance, atr=atr),
         ]
     )
 
@@ -1153,6 +1199,7 @@ def run_gui():
                 short_ema,
                 long_ema,
             ) = compute_indicators(df_btc)
+            atr = compute_atr(df_btc)
             predicted_price_raw = train_lstm(df_btc, model_type=model_var.get())
             buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
             depth_signal = compute_order_book_signal(buy_depth, sell_depth, mid_price=price)
@@ -1219,6 +1266,11 @@ def run_gui():
             entry_short = resistance * 0.99
             stop_short = resistance * 1.02
             take_short = entry_short - (stop_short - entry_short) * strategy.config["rr"]
+            if atr:
+                stop_long = entry_long - atr * 1.2
+                stop_short = entry_short + atr * 1.2
+                take_long = entry_long + (entry_long - stop_long) * strategy.config["rr"]
+                take_short = entry_short - (stop_short - entry_short) * strategy.config["rr"]
             qty_long = strategy._position_size(account_state["balance"], entry_long, stop_long)
             qty_short = strategy._position_size(account_state["balance"], entry_short, stop_short)
             amount_long = qty_long * entry_long
@@ -1233,6 +1285,7 @@ def run_gui():
                 signal,
                 short_ema,
                 long_ema,
+                atr=atr,
                 strategy=strategy,
             )
             trend_block = (
@@ -1434,6 +1487,7 @@ def monitor():
                 short_ema,
                 long_ema,
             ) = compute_indicators(df_btc)
+            atr = compute_atr(df_btc)
 
             # LSTM预测
             predicted_price_raw = train_lstm(df_btc)
@@ -1520,6 +1574,7 @@ def monitor():
                     signal,
                     short_ema,
                     long_ema,
+                    atr=atr,
                 ),
             )
 
