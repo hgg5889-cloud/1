@@ -745,7 +745,7 @@ def run_gui():
         report_frame,
         columns=("category", "content"),
         show="headings",
-        height=8,
+        height=6,
     )
     report_table.heading("category", text="分类")
     report_table.heading("content", text="内容")
@@ -760,6 +760,29 @@ def run_gui():
     ]
     for row_id, label in report_rows:
         report_table.insert("", "end", iid=row_id, values=(label, "—"))
+
+    strategy_frame = Frame(root)
+    strategy_frame.pack(fill=BOTH, padx=8, pady=6)
+    Label(strategy_frame, text="策略表").pack(side=LEFT, padx=6)
+    strategy_table = ttk.Treeview(
+        strategy_frame,
+        columns=("side", "entry", "stop", "take", "amount"),
+        show="headings",
+        height=4,
+    )
+    strategy_table.heading("side", text="方向")
+    strategy_table.heading("entry", text="入场")
+    strategy_table.heading("stop", text="止损")
+    strategy_table.heading("take", text="止盈")
+    strategy_table.heading("amount", text="金额")
+    strategy_table.column("side", width=80, anchor="center")
+    strategy_table.column("entry", width=120, anchor="center")
+    strategy_table.column("stop", width=120, anchor="center")
+    strategy_table.column("take", width=120, anchor="center")
+    strategy_table.column("amount", width=120, anchor="center")
+    strategy_table.pack(side=LEFT, padx=6)
+    for row_id, label in [("long", "做多"), ("short", "做空")]:
+        strategy_table.insert("", "end", iid=row_id, values=(label, "—", "—", "—", "—"))
 
     account_frame = Frame(root)
     account_frame.pack(fill=BOTH, padx=8, pady=6)
@@ -851,6 +874,18 @@ def run_gui():
                 selected_tickers = [macro_sources[i][1] for i in selected_indices]
             macro_info = build_macro_summary(df_ext, selected_tickers=selected_tickers)
 
+            strategy = TradeStrategy()
+            entry_long = support * 1.01
+            stop_long = support * 0.98
+            take_long = entry_long + (entry_long - stop_long) * strategy.config["rr"]
+            entry_short = resistance * 0.99
+            stop_short = resistance * 1.02
+            take_short = entry_short - (stop_short - entry_short) * strategy.config["rr"]
+            qty_long = strategy._position_size(account_state["balance"], entry_long, stop_long)
+            qty_short = strategy._position_size(account_state["balance"], entry_short, stop_short)
+            amount_long = qty_long * entry_long
+            amount_short = qty_short * entry_short
+
             strategy_block = build_strategy_report(
                 price,
                 support,
@@ -873,6 +908,22 @@ def run_gui():
             report_table.set("trend", "content", trend_block)
             report_table.set("macro", "content", f"{macro_info}\n{build_depth_insights()}")
             report_table.set("strategy", "content", strategy_block)
+            strategy_table.set(
+                "long",
+                "entry",
+                f"{entry_long:.2f}",
+            )
+            strategy_table.set("long", "stop", f"{stop_long:.2f}")
+            strategy_table.set("long", "take", f"{take_long:.2f}")
+            strategy_table.set("long", "amount", f"{amount_long:.2f} USDT")
+            strategy_table.set(
+                "short",
+                "entry",
+                f"{entry_short:.2f}",
+            )
+            strategy_table.set("short", "stop", f"{stop_short:.2f}")
+            strategy_table.set("short", "take", f"{take_short:.2f}")
+            strategy_table.set("short", "amount", f"{amount_short:.2f} USDT")
             metrics_table.set("price", "value", f"{price:.2f}")
             metrics_table.set("delta", "value", f"{delta:+.2f} ({delta_pct:+.2f}%)")
             metrics_table.set("support", "value", format_level(support))
