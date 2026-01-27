@@ -507,11 +507,26 @@ def format_level(value):
 
 
 # 可视化价格与预测结果
-def plot_graph(ax, df, predicted_price):
+def plot_graph(ax, df, predicted_price, levels=None):
     ax.clear()
     ax.plot(df["close"], label="实际价格")
     ax.axvline(x=len(df), color="r", linestyle="--", label="预测点")
     ax.scatter(len(df), predicted_price, color="g", label="预测价格", zorder=5)
+    if levels:
+        x_pos = len(df) - 1
+        for label, value, color in levels:
+            if pd.isna(value):
+                continue
+            ax.axhline(y=value, color=color, linestyle=":", linewidth=1)
+            ax.text(
+                x_pos,
+                value,
+                f"{label}:{value:.2f}",
+                color=color,
+                fontsize=8,
+                verticalalignment="bottom",
+                horizontalalignment="right",
+            )
     ax.legend(loc="best")
     ax.set_title("BTC价格与预测结果")
 
@@ -678,7 +693,15 @@ def run_gui():
             )
             report_box.delete("1.0", END)
             report_box.insert(END, report)
-            plot_graph(ax, df_btc, predicted_price)
+            levels = [
+                (f"{interval.upper()}支撑", support, "tab:green"),
+                (f"{interval.upper()}压力", resistance, "tab:red"),
+                ("1H支撑", support_1h, "tab:blue"),
+                ("1H压力", resistance_1h, "tab:purple"),
+                ("4H支撑", support_4h, "tab:olive"),
+                ("4H压力", resistance_4h, "tab:brown"),
+            ]
+            plot_graph(ax, df_btc, predicted_price, levels=levels)
             canvas.draw()
             status_label.config(text=f"状态: 已更新 {datetime.now().strftime('%H:%M:%S')}")
 
@@ -832,7 +855,15 @@ def monitor():
             # 可视化
             plt.figure(figsize=(10, 5))
             ax = plt.gca()
-            plot_graph(ax, df_btc, predicted_price)
+            levels = [
+                (f"{INTERVAL.upper()}支撑", support, "tab:green"),
+                (f"{INTERVAL.upper()}压力", resistance, "tab:red"),
+                ("1H支撑", support_1h, "tab:blue"),
+                ("1H压力", resistance_1h, "tab:purple"),
+                ("4H支撑", support_4h, "tab:olive"),
+                ("4H压力", resistance_4h, "tab:brown"),
+            ]
+            plot_graph(ax, df_btc, predicted_price, levels=levels)
             plt.show()
 
             # 每5秒更新一次
