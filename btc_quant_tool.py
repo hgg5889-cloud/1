@@ -19,12 +19,13 @@ warnings.filterwarnings("ignore", category=UserWarning, module="tkinter")
 
 # 设置API
 BINANCE_BASE = "https://api.binance.com/api/v3"
+BINANCE_FUTURES_BASE = "https://fapi.binance.com/fapi/v1"
 SYMBOL = "BTCUSDT"
 INTERVAL = "4h"  # 4小时数据
 
 
 # 获取实时价格数据
-def fetch_klines(symbol, interval="4h", limit=300):
+def fetch_klines(symbol, interval="4h", limit=500):
     url = f"{BINANCE_BASE}/klines?symbol={symbol}&interval={interval}&limit={limit}"
 
     try:
@@ -70,12 +71,15 @@ def fetch_klines(symbol, interval="4h", limit=300):
 def fetch_external_data(max_retries=3, backoff_seconds=2):
     for attempt in range(1, max_retries + 1):
         try:
-            return yf.download(
-                "^GSPC",
+            tickers = ["^GSPC", "DX-Y.NYB", "GC=F"]
+            data = yf.download(
+                tickers,
                 start="2022-01-01",
                 end=datetime.today().strftime("%Y-%m-%d"),
+                group_by="ticker",
                 progress=False,
             )
+            return data
         except Exception as error:
             print(f"获取外部数据失败(第{attempt}次): {error}")
             if attempt < max_retries:
@@ -84,8 +88,8 @@ def fetch_external_data(max_retries=3, backoff_seconds=2):
 
 
 # 获取市场深度数据
-def get_order_book(symbol="BTCUSDT"):
-    url = f"{BINANCE_BASE}/depth?symbol={symbol}&limit=50"
+def get_order_book(symbol="BTCUSDT", depth_limit=1000):
+    url = f"{BINANCE_BASE}/depth?symbol={symbol}&limit={depth_limit}"
     try:
         response = requests.get(url, timeout=5)
         response.raise_for_status()  # 检查API请求是否成功
@@ -98,6 +102,43 @@ def get_order_book(symbol="BTCUSDT"):
     except requests.exceptions.RequestException as error:
         print(f"API 请求失败: {error}")
         return [], []  # 如果请求失败，返回空列表
+
+
+def fetch_futures_klines(symbol, interval="1h", limit=500):
+    url = (
+        f"{BINANCE_FUTURES_BASE}/continuousKlines"
+        f"?pair={symbol}&contractType=PERPETUAL&interval={interval}&limit={limit}"
+    )
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        if not data:
+            return pd.DataFrame()
+        df = pd.DataFrame(data)
+        df.columns = [
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_asset_vol",
+            "trades",
+            "tb_base_av",
+            "tb_quote_av",
+            "ignore",
+        ]
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
+        df["open"] = pd.to_numeric(df["open"], errors="coerce")
+        df["high"] = pd.to_numeric(df["high"], errors="coerce")
+        df["low"] = pd.to_numeric(df["low"], errors="coerce")
+        return df
+    except requests.exceptions.RequestException as error:
+        print(f"期货API 请求失败: {error}")
+        return pd.DataFrame()
 
 
 # 计算RSI、MACD和布林带
@@ -159,7 +200,7 @@ def train_lstm(df):
 
 
 # 支撑位与阻力位计算
-def _parse_depth_levels(levels, limit=10):
+def _parse_depth_levels(levels, limit=200):
     parsed = []
     for price, qty in levels[:limit]:
         parsed.append((float(price), float(qty)))
@@ -199,10 +240,36 @@ def calculate_support_resistance(df, buy_depth=None, sell_depth=None, window=200
 
 
 # 数据整合：获取所有相关数据
+def merge_market_data(btc_df, external_df):
+    if btc_df.empty:
+        return btc_df
+    merged = btc_df.copy()
+    merged["timestamp"] = pd.to_datetime(merged["open_time"], unit="ms")
+    merged = merged.set_index("timestamp")
+    if external_df.empty:
+        return merged
+    if isinstance(external_df.columns, pd.MultiIndex):
+        external_close = external_df.xs("Close", axis=1, level=1)
+    else:
+        external_close = external_df[["Close"]].rename(columns={"Close": "^GSPC"})
+    external_close = external_close.rename(
+        columns={
+            "^GSPC": "sp500_close",
+            "DX-Y.NYB": "dxy_close",
+            "GC=F": "gold_close",
+        }
+    )
+    external_close.index = pd.to_datetime(external_close.index)
+    external_close = external_close.resample("4H").ffill()
+    merged = merged.join(external_close, how="left")
+    return merged
+
+
 def collect_data():
     df_btc = fetch_klines(SYMBOL, INTERVAL)
     df_ext = fetch_external_data()  # 获取外部经济数据
-    return df_btc, df_ext
+    merged = merge_market_data(df_btc, df_ext)
+    return merged, df_ext
 
 
 # 生成最终报告
@@ -221,6 +288,7 @@ def generate_report(
     resistance,
     buy_depth=None,
     sell_depth=None,
+    trend_info=None,
 ):
     def fmt(value):
         return f"{value:.2f}" if pd.notna(value) else "N/A"
@@ -235,6 +303,64 @@ def generate_report(
     print(f"EMA: 短期: {fmt(short_ema)} 长期: {fmt(long_ema)}")
     trend = "看涨" if predicted_price > price else "看跌"
     print(f"趋势: {trend}")
+    if trend_info:
+        print(trend_info)
+
+
+def analyze_trend(df, timeframe_label):
+    if df.empty:
+        return "趋势: 数据不足"
+    close = df["close"]
+    volume = df["volume"]
+    short_ma = close.rolling(window=20).mean().iloc[-1]
+    long_ma = close.rolling(window=50).mean().iloc[-1]
+    rsi = RSIIndicator(close, window=14).rsi().iloc[-1]
+    vol_mean = volume.rolling(window=20).mean().iloc[-1]
+    latest_price = close.iloc[-1]
+    latest_volume = volume.iloc[-1]
+
+    if pd.isna(short_ma) or pd.isna(long_ma) or pd.isna(rsi) or pd.isna(vol_mean):
+        return f"{timeframe_label}趋势判断: 数据不足"
+
+    trend = "震荡"
+    if latest_price > long_ma and short_ma > long_ma:
+        trend = "上行趋势"
+    elif latest_price < long_ma and short_ma < long_ma:
+        trend = "下行趋势"
+
+    momentum = "多头" if rsi > 55 else "空头" if rsi < 45 else "中性"
+    vol_state = "放量" if latest_volume > vol_mean else "缩量"
+
+    signal = "观望"
+    if trend == "上行趋势" and momentum == "多头" and vol_state == "放量":
+        signal = "短线偏多"
+    elif trend == "下行趋势" and momentum == "空头" and vol_state == "放量":
+        signal = "短线偏空"
+
+    return (
+        f"{timeframe_label}趋势判断: {trend} | RSI: {rsi:.2f} | "
+        f"均线: MA20 {short_ma:.2f} / MA50 {long_ma:.2f} | "
+        f"成交量: {vol_state} | 信号: {signal}"
+    )
+
+
+def describe_market_state(price, support, resistance):
+    if pd.isna(support) or pd.isna(resistance):
+        return "行情结构: 数据不足"
+    range_width = resistance - support
+    if range_width <= 0:
+        return "行情结构: 区间异常"
+    if price > resistance:
+        return f"行情结构: 突破上沿，强弱分界 {resistance:.2f}"
+    if price < support:
+        return f"行情结构: 跌破下沿，强弱分界 {support:.2f}"
+    if (price - support) / range_width < 0.2 or (resistance - price) / range_width < 0.2:
+        return f"行情结构: 震荡偏强/弱，强弱分界 {support:.2f}-{resistance:.2f}"
+    return f"行情结构: 区间震荡，强弱分界 {support:.2f}-{resistance:.2f}"
+
+
+def format_level(value):
+    return f"{value:.2f}" if pd.notna(value) else "N/A"
 
 
 # 可视化价格与预测结果
@@ -254,6 +380,8 @@ def monitor():
         try:
             # 获取数据
             df_btc, df_ext = collect_data()
+            df_futures_1h = fetch_futures_klines(SYMBOL, interval="1h")
+            df_futures_4h = fetch_futures_klines(SYMBOL, interval="4h")
 
             if df_btc.empty:
                 continue  # 如果没有数据返回，跳过当前循环
@@ -275,7 +403,7 @@ def monitor():
             predicted_price = train_lstm(df_btc)
 
             # 市场深度
-            buy_depth, sell_depth = get_order_book(SYMBOL)
+            buy_depth, sell_depth = get_order_book(SYMBOL, depth_limit=1000)
 
             # 支撑位和阻力位
             support, resistance = calculate_support_resistance(
@@ -283,6 +411,19 @@ def monitor():
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
             )
+            support_1h, resistance_1h = calculate_support_resistance(
+                df_futures_1h,
+                buy_depth=buy_depth,
+                sell_depth=sell_depth,
+            )
+            support_4h, resistance_4h = calculate_support_resistance(
+                df_futures_4h,
+                buy_depth=buy_depth,
+                sell_depth=sell_depth,
+            )
+            trend_1h = analyze_trend(df_futures_1h, "1H")
+            trend_4h = analyze_trend(df_futures_4h, "4H")
+            market_state = describe_market_state(price, support_4h, resistance_4h)
 
             # 输出报告
             generate_report(
@@ -300,6 +441,12 @@ def monitor():
                 resistance,
                 buy_depth=buy_depth,
                 sell_depth=sell_depth,
+                trend_info=(
+                    f"1H支撑/压力: {format_level(support_1h)}/{format_level(resistance_1h)} | "
+                    f"4H支撑/压力: {format_level(support_4h)}/{format_level(resistance_4h)}\n"
+                    f"{trend_1h}\n{trend_4h}\n"
+                    f"解读BTC实时价格{format_level(price)}: {market_state}，注意关键强弱分界。"
+                ),
             )
 
             # 可视化
