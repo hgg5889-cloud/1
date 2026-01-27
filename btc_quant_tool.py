@@ -704,7 +704,7 @@ def run_gui():
         flow_listbox.insert(END, label)
     flow_listbox.pack(side=LEFT, padx=6)
 
-    status_label = Label(control_frame, text="状态: 等待中")
+    status_label = Label(control_frame, text="状态: 手动刷新")
     status_label.pack(side=RIGHT)
 
     figure, ax = plt.subplots(figsize=(6, 4))
@@ -737,7 +737,7 @@ def run_gui():
         "entry_price": None,
     }
 
-    running = {"value": True}
+    running = {"value": False}
 
     def update_once(force=False):
         if not running["value"] and not force:
@@ -866,12 +866,13 @@ def run_gui():
             )
             pnl_var.set(f"未实现盈亏: {pnl:.2f} USDT")
 
-        refresh_ms = int(refresh_seconds.get()) * 1000
-        root.after(refresh_ms, update_once)
+        if running["value"]:
+            refresh_ms = int(refresh_seconds.get()) * 1000
+            root.after(refresh_ms, update_once)
 
     def toggle_running():
         running["value"] = not running["value"]
-        state_text = "暂停" if running["value"] else "已暂停"
+        state_text = "自动刷新中" if running["value"] else "手动刷新"
         status_label.config(text=f"状态: {state_text}")
         if running["value"]:
             update_once()
@@ -913,12 +914,11 @@ def run_gui():
         account_state["entry_price"] = None
         update_once(force=True)
 
-    Button(control_frame, text="开始/暂停", command=toggle_running).pack(side=LEFT, padx=8)
+    Button(control_frame, text="自动/手动", command=toggle_running).pack(side=LEFT, padx=8)
     Button(control_frame, text="手动刷新", command=manual_refresh).pack(side=LEFT, padx=6)
     Button(control_frame, text="开多(模拟)", command=open_long).pack(side=LEFT, padx=6)
     Button(control_frame, text="平仓(模拟)", command=close_position).pack(side=LEFT, padx=6)
 
-    update_once()
     root.mainloop()
 
 
