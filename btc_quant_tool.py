@@ -397,16 +397,19 @@ def calculate_support_resistance(df, buy_depth=None, sell_depth=None, window=200
     recent = df.tail(window) if len(df) > window else df
     highs = recent["high"].dropna().values
     lows = recent["low"].dropna().values
+    price = recent["close"].iloc[-1] if not recent.empty else float("nan")
 
     if highs.size == 0 or lows.size == 0:
         return float("nan"), float("nan")
 
-    # 使用分位数降低极值影响
-    support_quantile = float(np.nanquantile(lows, 0.1))
-    resistance_quantile = float(np.nanquantile(highs, 0.9))
+    # 使用分位数 + 最近价格位置，动态选择支撑/阻力
+    support_candidates = [float(np.nanquantile(lows, q)) for q in (0.1, 0.2, 0.3, 0.4)]
+    resistance_candidates = [float(np.nanquantile(highs, q)) for q in (0.6, 0.7, 0.8, 0.9)]
 
-    support = support_quantile
-    resistance = resistance_quantile
+    support_below = [level for level in support_candidates if level <= price]
+    resistance_above = [level for level in resistance_candidates if level >= price]
+    support = max(support_below) if support_below else float(np.nanquantile(lows, 0.05))
+    resistance = min(resistance_above) if resistance_above else float(np.nanquantile(highs, 0.95))
 
     if buy_depth and sell_depth:
         bids = _parse_depth_levels(buy_depth)
@@ -415,12 +418,18 @@ def calculate_support_resistance(df, buy_depth=None, sell_depth=None, window=200
         if bids:
             bid_prices, bid_qtys = zip(*bids)
             weighted_bid = np.average(bid_prices, weights=bid_qtys)
-            support = (support + weighted_bid) / 2
+            support_candidates.append(weighted_bid)
 
         if asks:
             ask_prices, ask_qtys = zip(*asks)
             weighted_ask = np.average(ask_prices, weights=ask_qtys)
-            resistance = (resistance + weighted_ask) / 2
+            resistance_candidates.append(weighted_ask)
+
+    # 结合深度加权后的候选重新选择
+    support_below = [level for level in support_candidates if level <= price]
+    resistance_above = [level for level in resistance_candidates if level >= price]
+    support = max(support_below) if support_below else min(support_candidates)
+    resistance = min(resistance_above) if resistance_above else max(resistance_candidates)
 
     return support, resistance
 
