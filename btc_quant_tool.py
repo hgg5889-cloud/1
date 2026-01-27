@@ -24,6 +24,7 @@ import requests
 import yfinance as yf
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.linear_model import LinearRegression
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
 from ta.volatility import BollingerBands
@@ -239,6 +240,84 @@ def compute_macro_bias(external_df):
     return base_bias + extra_bias
 
 
+def compute_feature_forecast(df, depth_signal=None, macro_bias=0.0, window=200):
+    if df.empty or len(df) < 60:
+        return None
+
+    data = df.tail(window).copy()
+    data["return"] = data["close"].pct_change()
+    data["rsi"] = RSIIndicator(data["close"], window=14).rsi()
+    macd = MACD(data["close"])
+    data["macd"] = macd.macd()
+    data["macd_signal"] = macd.macd_signal()
+    bands = BollingerBands(data["close"], window=20, window_dev=2)
+    band_width = (bands.bollinger_hband() - bands.bollinger_lband()).replace(0, np.nan)
+    data["band_pos"] = (data["close"] - bands.bollinger_lband()) / band_width
+    data["mfi"] = MFIIndicator(
+        high=data["high"],
+        low=data["low"],
+        close=data["close"],
+        volume=data["volume"],
+        window=14,
+    ).money_flow_index()
+    obv = OnBalanceVolumeIndicator(close=data["close"], volume=data["volume"]).on_balance_volume()
+    data["obv_delta"] = obv.diff()
+    data["vol_ratio"] = data["volume"] / data["volume"].rolling(20).mean()
+    data["momentum_5"] = data["close"].pct_change(5)
+    data["momentum_10"] = data["close"].pct_change(10)
+
+    external_bias = 0.0
+    for column in ("sp500_close", "dxy_close", "gold_close", "vix_close", "us10y_close"):
+        if column in data.columns:
+            pct = data[column].pct_change()
+            if column == "sp500_close":
+                external_bias += pct * 0.03
+            elif column == "dxy_close":
+                external_bias -= pct * 0.03
+            elif column == "gold_close":
+                external_bias += pct * 0.01
+            elif column == "vix_close":
+                external_bias -= pct * 0.02
+            elif column == "us10y_close":
+                external_bias -= pct * 0.01
+    data["external_bias"] = external_bias
+    data["macro_bias"] = macro_bias
+    data["depth_pressure"] = depth_signal["pressure"] if depth_signal else 0.0
+    data["depth_imbalance"] = depth_signal["imbalance"] if depth_signal else 0.0
+
+    feature_columns = [
+        "rsi",
+        "macd",
+        "macd_signal",
+        "band_pos",
+        "mfi",
+        "obv_delta",
+        "vol_ratio",
+        "momentum_5",
+        "momentum_10",
+        "external_bias",
+        "macro_bias",
+        "depth_pressure",
+        "depth_imbalance",
+    ]
+    data["target"] = data["return"].shift(-1)
+    model_data = data[feature_columns + ["target"]].dropna()
+    if len(model_data) < 50:
+        return None
+
+    X = model_data[feature_columns].values
+    y = model_data["target"].values
+    model = LinearRegression()
+    model.fit(X, y)
+    latest_features = data[feature_columns].iloc[-1].values.reshape(1, -1)
+    predicted_return = float(model.predict(latest_features)[0])
+    volatility = data["return"].rolling(20).std().iloc[-1]
+    if pd.notna(volatility) and volatility > 0:
+        cap = volatility * 2.5
+        predicted_return = float(np.clip(predicted_return, -cap, cap))
+    return predicted_return
+
+
 def compute_prediction_metrics(
     df,
     price,
@@ -264,6 +343,14 @@ def compute_prediction_metrics(
             + 0.20 * depth_signal["micro_price"]
         )
         depth_bias = 0.6 * depth_signal["pressure"] + 0.4 * depth_signal["imbalance"]
+
+    feature_return = compute_feature_forecast(
+        df,
+        depth_signal=depth_signal,
+        macro_bias=macro_bias,
+    )
+    if feature_return is not None:
+        base_prediction = base_prediction * 0.7 + price * (1 + feature_return) * 0.3
 
     ema_trend = (short_ema - long_ema) / price if price else 0.0
     macd_trend = (macd_line - signal) / price if price else 0.0
