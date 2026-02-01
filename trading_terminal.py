@@ -3,6 +3,7 @@ import os
 import platform
 import threading
 import time
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -15,6 +16,8 @@ from tkinter import ttk
 
 # ===== GPU 加速：PyTorch =====
 import torch
+
+warnings.filterwarnings("ignore", category=UserWarning, module="tkinter")
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("当前计算设备:", device)
